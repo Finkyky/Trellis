@@ -7,6 +7,8 @@ import {
   getWriteMode,
   writeFile,
   ensureDir,
+  startRecordingWrites,
+  stopRecordingWrites,
 } from "../../src/utils/file-writer.js";
 
 // =============================================================================
@@ -145,5 +147,63 @@ describe("writeFile", () => {
     const result = await writeFile(filePath, "line2");
     expect(result).toBe(true);
     expect(fs.readFileSync(filePath, "utf-8")).toBe("line1\nline2");
+  });
+
+  it("falls back to skip in non-TTY when mode is 'ask' (CI safety net for issue #204)", async () => {
+    const filePath = path.join(tmpDir, "non-tty-conflict.txt");
+    fs.writeFileSync(filePath, "original");
+    setWriteMode("ask");
+
+    // Vitest runs without a TTY on stdin (process.stdin.isTTY is undefined),
+    // so this exercises the layer-level fallback that prevents
+    // ERR_USE_AFTER_CLOSE from inquirer when a CLI flag forgot to call
+    // setWriteMode.
+    expect(process.stdin.isTTY).toBeFalsy();
+
+    const result = await writeFile(filePath, "new content");
+    expect(result).toBe(false);
+    expect(fs.readFileSync(filePath, "utf-8")).toBe("original");
+  });
+});
+
+describe("write recording", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "trellis-record-"));
+    setWriteMode("force");
+  });
+
+  afterEach(() => {
+    stopRecordingWrites();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    setWriteMode("ask");
+  });
+
+  it("records new and overwritten files, but not identical, skipped, or appended files", async () => {
+    const recorded = startRecordingWrites(tmpDir);
+
+    await writeFile(path.join(tmpDir, "new.txt"), "content");
+
+    const samePath = path.join(tmpDir, "same.txt");
+    fs.writeFileSync(samePath, "same");
+    await writeFile(samePath, "same");
+
+    const overwritePath = path.join(tmpDir, "overwrite.txt");
+    fs.writeFileSync(overwritePath, "old");
+    setWriteMode("force");
+    await writeFile(overwritePath, "new");
+
+    const skipPath = path.join(tmpDir, "skip.txt");
+    fs.writeFileSync(skipPath, "old");
+    setWriteMode("skip");
+    await writeFile(skipPath, "new");
+
+    const appendPath = path.join(tmpDir, "append.txt");
+    fs.writeFileSync(appendPath, "old");
+    setWriteMode("append");
+    await writeFile(appendPath, "new");
+
+    expect([...recorded].sort()).toEqual(["new.txt", "overwrite.txt"]);
   });
 });

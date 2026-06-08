@@ -15,10 +15,42 @@ export interface MigrationItem {
   from: string;
   /** Target path for renames (relative to project root) */
   to?: string;
-  /** Human-readable description of the change */
+  /** Human-readable description of WHAT this migration does */
   description?: string;
+  /**
+   * Optional context shown in the "confirm" prompt explaining WHY the user is
+   * being asked about this specific file. Use this for version-specific nuance
+   * (e.g. a known hash-tracking gap from a prior CLI version) that would
+   * otherwise have to be hardcoded in update.ts. Keep it short (1-2 sentences).
+   */
+  reason?: string;
   /** Known template hashes for safe-file-delete (only delete if content matches) */
   allowed_hashes?: string[];
+}
+
+/**
+ * A new top-level config.yaml section introduced by this release.
+ *
+ * Used by `trellis update` to append the section to existing user config files
+ * that pre-date the release, without overwriting their other customizations.
+ * Append is gated on `sentinel`: if the user file already contains the sentinel
+ * substring (live or commented), the section is treated as already present.
+ */
+export interface ConfigSectionAdded {
+  /** Target file relative to project root (e.g. `.trellis/config.yaml`). */
+  file: string;
+  /**
+   * Substring whose presence in the user file means this section already
+   * exists. Pick something stable (e.g. the new top-level YAML key like
+   * `codex:`).
+   */
+  sentinel: string;
+  /**
+   * The section heading text that appears on the `# <heading>` line inside the
+   * `#---` separator block in the bundled template. The extractor takes lines
+   * from that separator block until the next `#---` separator (or EOF).
+   */
+  sectionHeading: string;
 }
 
 /**
@@ -41,6 +73,12 @@ export interface MigrationManifest {
   migrationGuide?: string;
   /** Instructions for AI assistants on how to help with migration */
   aiInstructions?: string;
+  /**
+   * New top-level config.yaml sections introduced by this release. Applied
+   * additively to existing user files via sentinel-gated append, keeping their
+   * customizations intact while still surfacing newly-introduced knobs.
+   */
+  configSectionsAdded?: ConfigSectionAdded[];
 }
 
 /**

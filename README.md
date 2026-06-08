@@ -7,16 +7,16 @@
 </p>
 
 <p align="center">
-<strong>A multi-platform AI coding framework that rules</strong><br/>
-<sub>Supports Claude Code, Cursor, OpenCode, iFlow, Codex, Kilo, Kiro, Gemini CLI, Antigravity, Windsurf, Qoder, CodeBuddy, GitHub Copilot, and Factory Droid.</sub>
+<strong>An out-of-the-box engineering framework for AI coding.</strong><br/>
+<sub>AI writes code fast, but every session it starts from scratch — no memory of your project, your conventions, or your team's requirements. Trellis persists specs, tasks, and memory into your repo, so any coding agent works to your engineering standards.</sub>
 </p>
 
 <p align="center">
 <a href="./README_CN.md">简体中文</a> •
 <a href="https://docs.trytrellis.app/">Docs</a> •
-<a href="https://docs.trytrellis.app/guide/ch02-quick-start">Quick Start</a> •
-<a href="https://docs.trytrellis.app/guide/ch13-multi-platform">Supported Platforms</a> •
-<a href="https://docs.trytrellis.app/guide/ch08-real-world">Use Cases</a>
+<a href="https://docs.trytrellis.app/start/install-and-first-task">Quick Start</a> •
+<a href="https://docs.trytrellis.app/advanced/multi-platform">Supported Platforms</a> •
+<a href="https://docs.trytrellis.app/start/real-world-scenarios">Use Cases</a>
 </p>
 
 <p align="center">
@@ -42,15 +42,14 @@
 | --- | --- |
 | **Auto-injected specs** | Write conventions once in `.trellis/spec/`, then let Trellis inject the relevant context into each session instead of repeating yourself. |
 | **Task-centered workflow** | Keep PRDs, implementation context, review context, and task status in `.trellis/tasks/` so AI work stays structured. |
-| **Parallel agent execution** | Run multiple AI tasks side by side with git worktrees instead of turning one branch into a traffic jam. |
 | **Project memory** | Journals in `.trellis/workspace/` preserve what happened last time, so each new session starts with real context. |
-| **Team-shared standards** | Specs live in the repo, so one person’s hard-won workflow or rule can benefit the whole team. |
+| **Team-shared standards** | Specs live in the repo, so one person's hard-won workflow or rule can benefit the whole team. |
 | **Multi-platform setup** | Bring the same Trellis structure to 14 AI coding platforms instead of rebuilding your workflow per tool. |
 
-## Prerequisites
+## Prerequisites:
 
-- **Node.js** ≥ 18
-- **Python** ≥ 3.10 (required for hooks and automation scripts)
+- **Node.js** >= 18
+- **Python** >= 3.9
 
 ## Quick Start
 
@@ -65,94 +64,56 @@ trellis init -u your-name
 trellis init --cursor --opencode --codex -u your-name
 ```
 
-- `-u your-name` creates `.trellis/workspace/your-name/` for personal journals and session continuity.
-- Platform flags can be mixed and matched. Current options include `--cursor`, `--opencode`, `--iflow`, `--codex`, `--kilo`, `--kiro`, `--gemini`, `--antigravity`, `--windsurf`, `--qoder`, `--codebuddy`, `--copilot`, and `--droid`.
-### Commands
+See the [Quick Start](https://docs.trytrellis.app/start/install-and-first-task) and [Supported Platforms](https://docs.trytrellis.app/advanced/multi-platform) guides for setup details.
 
-| Command | What it does |
-| --- | --- |
-| `/start` | Load project context into the session. Run once at the beginning — on platforms with hooks (Claude Code, iFlow, OpenCode, Codex, GitHub Copilot) this happens automatically. |
-| `/brainstorm` | Walk through requirements and produce a PRD. Use when starting a new feature or when the scope is unclear. |
-| `/before-dev` | Read the relevant specs before you start coding (auto-detects frontend/backend). Run after `/brainstorm` and before writing any code. |
-| `/check` | Review your changes against project specs and auto-fix violations (auto-detects frontend/backend). Run after implementation, before committing. |
-| `/finish-work` | Pre-commit checklist covering lint, tests, docs, and API changes. Run right before `git commit` as a final gate. |
-| `/parallel` | Spin up multiple agents in isolated git worktrees. Use for large tasks that can be split into independent subtasks. |
-| `/record-session` | Save a session summary to the workspace journal. Run after the human has tested and committed the code. |
-| `/update-spec` | Capture a new pattern or convention into spec files. Run whenever you discover a rule worth preserving for future sessions. |
+## How to Use
 
-## Use Cases
+The workflow is simple:
 
-### "AI keeps ignoring our conventions"
-
-You write a database naming rule once in `.trellis/spec/backend/database-guidelines.md`. From that point on, every session — whether started by you, a teammate, or a parallel agent — gets that rule injected automatically. No more pasting the same instructions into every chat window.
-
-### "I need three features done by Friday"
-
-Run `/parallel` to spin up three agents, each in its own git worktree with its own branch. They implement, self-check, and open draft PRs independently. You review and merge when ready — no waiting, no branch conflicts.
-
-### "New session, zero context"
-
-When you `/record-session` at the end of a workday, the current session summary lands in your workspace journal. When you start a new session the next day, the startup hook picks it up automatically, so the AI already knows what you shipped, what broke, and what’s left.
-
-### "Half the team uses Cursor, half uses Claude Code"
-
-Run `trellis init --cursor --claude` once. Both tools read the same `.trellis/spec/` and `.trellis/tasks/`. A spec improvement made in a Claude Code session is available in Cursor the next time someone opens the project.
+1. **Describe what you want** in natural language.
+2. **Brainstorm** with the AI one question at a time until the PRD is clear, then implementation begins.
+3. **Let it run** — the AI calls Trellis Implement and auto-checks the result against specs, lint, type-check, and tests.
+4. **Type `/trellis:finish-work`** when the work is done or the session context fills up. Trellis archives the task and updates journals.
 
 ## How It Works
 
-Trellis keeps the core workflow in `.trellis/` and generates the platform-specific entry points you need around it.
+Trellis runs a 4-phase loop with auto-invoked skills and sub-agents:
 
-```text
-.trellis/
-├── spec/                    # Project standards, patterns, and guides
-├── tasks/                   # Task PRDs, context files, and status
-├── workspace/               # Journals and developer-specific continuity
-├── workflow.md              # Shared workflow rules
-└── scripts/                 # Utilities that power the workflow
-```
+1. **Plan** — `trellis-brainstorm` walks through requirements one question at a time and writes `prd.md`. Research-heavy items go to a `trellis-research` sub-agent. The result is curated specs + research files referenced from `implement.jsonl` / `check.jsonl`.
+2. **Implement** — a `trellis-implement` sub-agent writes code from the PRD with the curated context auto-injected, no git commit.
+3. **Verify** — a `trellis-check` sub-agent reviews the diff against specs and runs lint, type-check, and tests, self-fixing where it can.
+4. **Finish** — a final check runs, then `trellis-update-spec` promotes new learnings back into `.trellis/spec/` so the next session starts smarter.
 
-Depending on the platforms you enable, Trellis also creates tool-specific integration files such as `.claude/`, `.cursor/`, `AGENTS.md`, `.agents/`, `.codex/`, `.kilocode/`, `.kiro/skills/`, `.gemini/`, `.agent/workflows/` (Antigravity), `.windsurf/workflows/`, `.qoder/`, `.codebuddy/`, `.github/copilot/`, `.github/hooks/`, `.github/prompts/`, and `.factory/` (Droid). For Codex, Trellis also installs project skills under `.agents/skills/` (shared with Cursor, Gemini CLI, GitHub Copilot, Amp, and Kimi Code).
+## Resources
 
-At a high level, the workflow is simple:
-
-1. Define standards in specs.
-2. Start or refine work from a task PRD.
-3. Let Trellis inject the right context for the current task.
-4. Use checks, journals, and worktrees to keep quality and continuity intact.
-
-## Spec Templates & Marketplace
-
-Specs ship as empty templates by default — they are meant to be customized for your project's stack and conventions. You can fill them from scratch, or start from a community template:
-
-```bash
-# Fetch templates from a custom registry
-trellis init --registry https://github.com/your-org/your-spec-templates
-```
-
-Browse available templates and learn how to publish your own on the [Spec Templates page](https://docs.trytrellis.app/templates/specs-index).
-
-## What's New
-
-- **v0.4.0**: command consolidation (`before-backend-dev` + `before-frontend-dev` → `before-dev`, `check-backend` + `check-frontend` → `check`), new `/update-spec` command for capturing knowledge into specs, internal Python scripts refactoring.
-- **v0.3.6**: task lifecycle hooks, custom template registries (`--registry`), parent-child subtasks, fix PreToolUse hook for CC v2.1.63+.
-- **v0.3.5**: hotfix for delete migration manifest field name (Kilo workflows).
-- **v0.3.4**: Qoder platform support, Kilo workflows migration, record-session task awareness.
-- **v0.3.1**: background watch mode for `trellis update`, improved `.gitignore` handling, docs refresh.
-- **v0.3.0**: platform support expanded from 2 to 10, Windows compatibility, remote spec templates, `/trellis:brainstorm`.
+| Need                            | Link                                                                           |
+| ------------------------------- | ------------------------------------------------------------------------------ |
+| Install Trellis in a repo       | [Quick Start](https://docs.trytrellis.app/start/install-and-first-task)        |
+| Understand platform differences | [Supported Platforms](https://docs.trytrellis.app/advanced/multi-platform)     |
+| See the workflow in practice    | [Real-World Scenarios](https://docs.trytrellis.app/start/real-world-scenarios) |
+| Start from spec templates       | [Spec Templates](https://docs.trytrellis.app/templates/specs-index)            |
+| Track releases                  | [Changelog](https://docs.trytrellis.app/changelog)                             |
 
 ## FAQ
 
 <details>
-<summary><strong>How is this different from <code>CLAUDE.md</code>, <code>AGENTS.md</code>, or <code>.cursorrules</code>?</strong></summary>
+<summary><strong>How is Trellis different from <code>CLAUDE.md</code>, <code>AGENTS.md</code>, or <code>.cursorrules</code>?</strong></summary>
 
-Those files are useful, but they tend to become monolithic. Trellis adds structure around them: layered specs, task context, workspace memory, and platform-aware workflow wiring.
+Those files are useful entry points, but they tend to become monolithic. Trellis adds scoped specs, task PRDs, workflow gates, workspace memory, and platform-aware generated files around them.
 
 </details>
 
 <details>
 <summary><strong>Is Trellis only for Claude Code?</strong></summary>
 
-No. Trellis supports 14 platforms today. See the [Supported Platforms](https://docs.trytrellis.app/guide/ch13-multi-platform) guide for the full list and per-tool setup.
+No. Trellis is a project layer that works across multiple coding agents and IDEs.
+
+</details>
+
+<details>
+<summary><strong>Is Trellis for solo developers or teams?</strong></summary>
+
+Both. Solo developers use it for memory and repeatable workflow. Teams get the larger benefit: shared standards, task boundaries, reviewable context, and platform portability.
 
 </details>
 
@@ -176,14 +137,10 @@ Yes. Personal workspace journals stay separate per developer, while shared specs
 
 ## Community & Resources
 
-- [Official Docs](https://docs.trytrellis.app/) - Product docs, setup guides, and architecture
-- [Quick Start](https://docs.trytrellis.app/guide/ch02-quick-start) - Get Trellis running in a repo fast
-- [Supported Platforms](https://docs.trytrellis.app/guide/ch13-multi-platform) - Platform-specific setup and command details
-- [Real-World Scenarios](https://docs.trytrellis.app/guide/ch08-real-world) - See how the workflow plays out in practice
-- [Changelog](https://docs.trytrellis.app/changelog/v0.4.0) - Track current releases and updates
-- [Tech Blog](https://docs.trytrellis.app/blog) - Product thinking and technical writeups
-- [GitHub Issues](https://github.com/mindfold-ai/Trellis/issues) - Report bugs or request features
-- [Discord](https://discord.com/invite/tWcCZ3aRHc) - Join the community
+- [Official Docs](https://docs.trytrellis.app/)
+- [GitHub Issues](https://github.com/mindfold-ai/Trellis/issues)
+- [Discord](https://discord.com/invite/tWcCZ3aRHc)
+- [Tech Blog](https://docs.trytrellis.app/blog)
 
 <p align="center">
 <a href="https://github.com/mindfold-ai/Trellis">Official Repository</a> •

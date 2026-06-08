@@ -4,6 +4,7 @@ import chalk from "chalk";
 import { Command } from "commander";
 import { init } from "../commands/init.js";
 import { update } from "../commands/update.js";
+import { uninstall } from "../commands/uninstall.js";
 import { DIR_NAMES } from "../constants/paths.js";
 import { VERSION, PACKAGE_NAME } from "../constants/version.js";
 import { compareVersions } from "../utils/compare-versions.js";
@@ -62,7 +63,6 @@ program
   .description("Initialize trellis in the current project")
   .option("--cursor", "Include Cursor commands")
   .option("--claude", "Include Claude Code commands")
-  .option("--iflow", "Include iFlow CLI commands")
   .option("--opencode", "Include OpenCode commands")
   .option("--codex", "Include Codex skills")
   .option("--kilo", "Include Kilo CLI commands")
@@ -74,6 +74,8 @@ program
   .option("--codebuddy", "Include CodeBuddy commands")
   .option("--copilot", "Include GitHub Copilot hooks")
   .option("--droid", "Include Factory Droid commands")
+  .option("--pi", "Include Pi Agent extension assets")
+  .option("--reasonix", "Include Reasonix skills")
   .option("-y, --yes", "Skip prompts and use defaults")
   .option(
     "-u, --user <name>",
@@ -104,6 +106,9 @@ program
         chalk.red("Error:"),
         error instanceof Error ? error.message : error,
       );
+      if (process.env.DEBUG || process.env.TRELLIS_DEBUG) {
+        console.error(error instanceof Error ? error.stack : error);
+      }
       process.exit(1);
     }
   });
@@ -132,6 +137,34 @@ program
         chalk.red("Error:"),
         error instanceof Error ? error.message : error,
       );
+      if (process.env.DEBUG || process.env.TRELLIS_DEBUG) {
+        console.error(error instanceof Error ? error.stack : error);
+      }
+      process.exit(1);
+    }
+  });
+
+program
+  .command("uninstall")
+  .description(
+    "Remove all trellis files (managed platform files + .trellis/) from this project",
+  )
+  .option("-y, --yes", "Skip confirmation prompt")
+  .option("--dry-run", "List what would be removed without changing anything")
+  .action(async (options: Record<string, unknown>) => {
+    try {
+      await uninstall({
+        yes: options.yes as boolean,
+        dryRun: options.dryRun as boolean,
+      });
+    } catch (error) {
+      console.error(
+        chalk.red("Error:"),
+        error instanceof Error ? error.message : error,
+      );
+      if (process.env.DEBUG || process.env.TRELLIS_DEBUG) {
+        console.error(error instanceof Error ? error.stack : error);
+      }
       process.exit(1);
     }
   });

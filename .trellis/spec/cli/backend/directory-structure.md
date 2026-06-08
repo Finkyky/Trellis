@@ -20,22 +20,51 @@ src/
 │   └── init.ts          # Each command in its own file
 ├── configurators/       # Configuration generators
 │   ├── index.ts         # Platform registry (PLATFORM_FUNCTIONS, derived helpers)
-│   ├── shared.ts        # Shared utilities (resolvePlaceholders)
+│   ├── shared.ts        # Shared utilities (resolvePlaceholders, writeSkills, writeAgents, writeSharedHooks)
+│   ├── antigravity.ts   # Antigravity configurator
 │   ├── claude.ts        # Claude Code configurator
+│   ├── codebuddy.ts     # CodeBuddy configurator
+│   ├── codex.ts         # Codex configurator
+│   ├── copilot.ts       # Copilot configurator
 │   ├── cursor.ts        # Cursor configurator
-│   ├── iflow.ts         # iFlow CLI configurator
+│   ├── droid.ts         # Droid configurator
+│   ├── gemini.ts        # Gemini CLI configurator
+│   ├── kilo.ts          # Kilo configurator
+│   ├── kiro.ts          # Kiro configurator
 │   ├── opencode.ts      # OpenCode configurator
+│   ├── qoder.ts         # Qoder configurator
+│   ├── windsurf.ts      # Windsurf configurator
 │   └── workflow.ts      # Creates .trellis/ structure
 ├── constants/           # Shared constants and paths
 │   └── paths.ts         # Path constants (centralized)
-├── templates/           # Template utilities and generic templates
+├── templates/           # Template utilities and platform templates
+│   ├── template-utils.ts # createTemplateReader() factory — eliminates boilerplate
+│   ├── extract.ts       # Template extraction utilities (.trellis/ files)
+│   ├── common/          # Single source of truth for commands + skills
+│   │   ├── commands/    # Slash commands (start.md, finish-work.md)
+│   │   ├── skills/      # Auto-triggered skills (before-dev, brainstorm, check, break-loop, update-spec)
+│   │   └── index.ts     # getCommandTemplates(), getSkillTemplates()
+│   ├── shared-hooks/    # Platform-independent Python hook scripts
+│   │   ├── index.ts     # getSharedHookScripts()
+│   │   ├── session-start.py
+│   │   ├── inject-shell-session-context.py
+│   │   ├── inject-workflow-state.py
+│   │   └── inject-subagent-context.py
+│   ├── claude/          # Claude Code templates (agents, hooks, settings)
+│   ├── codebuddy/       # CodeBuddy templates (agents, settings)
+│   ├── codex/           # Codex templates (agents, hooks.json)
+│   ├── copilot/         # Copilot templates (prompts, hooks, hooks.json)
+│   ├── cursor/          # Cursor templates (agents, hooks.json)
+│   ├── droid/           # Droid templates (droids, settings)
+│   ├── gemini/          # Gemini templates (agents, settings)
+│   ├── kiro/            # Kiro templates (agents as JSON)
+│   ├── opencode/        # OpenCode templates (agents, plugin, lib)
+│   ├── qoder/           # Qoder templates (agents, settings)
 │   ├── markdown/        # Generic markdown templates
 │   │   ├── spec/        # Spec templates (*.md.txt)
-│   │   ├── init-agent.md    # Project root file template
-│   │   ├── agents.md        # Project root file template
-│   │   ├── worktree.yaml.txt # Generic worktree config
+│   │   ├── agents.md    # Project root file template
 │   │   └── index.ts     # Template exports
-│   └── extract.ts       # Template extraction utilities
+│   └── trellis/         # .trellis/ workflow templates (scripts, workflow.md)
 ├── types/               # TypeScript type definitions
 │   └── ai-tools.ts      # AI tool types and registry
 ├── utils/               # Shared utility functions
@@ -66,8 +95,7 @@ These directories are copied to `dist/` during build and used as templates:
 
 .trellis/                # Trellis workflow (partially dogfooded)
 ├── scripts/             # Python scripts (dogfooded)
-│   ├── common/          # Shared utilities (paths.py, developer.py, etc.)
-│   ├── multi_agent/     # Pipeline scripts (start.py, status.py, etc.)
+│   ├── common/          # Shared utilities (paths.py, developer.py, cli_adapter.py, etc.)
 │   ├── hooks/           # Lifecycle hook scripts (project-specific, NOT dogfooded)
 │   └── *.py             # Main scripts (task.py, get_context.py, etc.)
 ├── workspace/           # Developer progress tracking
@@ -77,7 +105,6 @@ These directories are copied to `dist/` during build and used as templates:
 │   ├── docs-site/       # Docs package specs (docs/)
 │   └── guides/          # Thinking guides
 ├── workflow.md          # Workflow documentation (dogfooded)
-├── worktree.yaml        # Worktree config (Trellis-specific)
 └── .gitignore           # Git ignore rules (dogfooded)
 ```
 
@@ -105,8 +132,6 @@ Files that use generic templates (in `src/templates/`):
 | Template Source | Destination | Reason |
 |----------------|-------------|--------|
 | `src/templates/markdown/spec/**/*.md.txt` | `.trellis/spec/**/*.md` | User fills with project-specific content |
-| `src/templates/markdown/worktree.yaml.txt` | `.trellis/worktree.yaml` | Language-agnostic template |
-| `src/templates/markdown/init-agent.md` | `init-agent.md` | Project root file |
 | `src/templates/markdown/agents.md` | `AGENTS.md` | Project root file |
 
 ### Build Process
@@ -120,15 +145,18 @@ dist/
 ├── .cursor/           # From project root .cursor/
 ├── .claude/           # From project root .claude/
 ├── .trellis/          # From project root .trellis/ (filtered)
-│   ├── scripts/       # All scripts
+│   ├── scripts/       # All scripts (no multi_agent/)
 │   ├── workspace/
 │   │   └── index.md   # Only index.md, no developer subdirs
 │   ├── workflow.md
-│   ├── worktree.yaml
 │   └── .gitignore
 └── templates/         # From src/templates/ (no .ts files)
+    ├── common/        # Shared command + skill templates
+    ├── shared-hooks/  # Platform-independent hook scripts
+    ├── claude/        # Claude-specific templates
+    ├── {platform}/    # Other platform templates
     └── markdown/
-        └── spec/      # Generic templates
+        └── spec/      # Generic spec templates
 ```
 
 ---
@@ -187,7 +215,6 @@ copyTrellisDir(srcRelativePath: string, destPath: string, options?: { executable
 | `kebab-case` | `multi-agent/` | All directories |
 | `*.ts` | `init.ts` | TypeScript source files |
 | `*.md.txt` | `index.md.txt` | Template files for markdown |
-| `*.yaml.txt` | `worktree.yaml.txt` | Template files for yaml |
 
 ### Why `.txt` Extension for Templates
 
@@ -195,6 +222,34 @@ Templates use `.txt` extension to:
 - Prevent IDE markdown preview from rendering templates
 - Make clear these are template sources, not actual docs
 - Avoid confusion with actual markdown files
+
+### Don't: Leak dogfood spec into `templates/markdown/spec/`
+
+**Invariant**: `packages/cli/src/templates/markdown/spec/` contains **only `.md.txt` files**. A bare `.md` file there is a bug — it ships to `dist/` (into the npm tarball) but is never imported by `markdown/index.ts`, so it never lands on a user's disk and serves no purpose except dead weight + future maintainer confusion.
+
+**How the bug happens** (confirmed in git log — v0.1.x through v0.4): a spec-authoring workflow writes to the wrong directory. The two paths look almost identical:
+
+| Path | Purpose |
+|------|---------|
+| `.trellis/spec/<pkg>/<layer>/*.md` | This repo's dogfood spec (Trellis documenting its own code) |
+| `packages/cli/src/templates/markdown/spec/<layer>/*.md.txt` | User-facing placeholder templates (ship to new projects via `trellis init`) |
+
+If you open-and-edit the wrong one, nothing fails at build / test / lint time — `markdown/index.ts` silently ignores your new file because it only reads the `.md.txt` variants. The drift can persist for years (caught in 2026-04 after ~3 months).
+
+**Prevention checklist** (apply whenever you add or edit a spec-layer file):
+
+1. Write spec content to `.trellis/spec/<pkg>/<layer>/<file>.md` — this is the dogfood location.
+2. Template stubs for users live in `packages/cli/src/templates/markdown/spec/<layer>/<file>.md.txt` — write the user-facing placeholder, NOT the real content.
+3. If the new file is not imported by `packages/cli/src/templates/markdown/index.ts`, it shouldn't exist in that directory. `ls packages/cli/src/templates/markdown/spec/**/*.md` must return empty.
+
+**Audit command**:
+```bash
+# Every file here must end in .md.txt
+find packages/cli/src/templates/markdown/spec -type f -name "*.md" ! -name "*.md.txt"
+# (empty output = clean)
+```
+
+Consider adding this find to a regression test (non-empty output → fail) so the invariant is machine-enforced, not memory-enforced.
 
 ---
 
@@ -220,6 +275,7 @@ Detects monorepo workspace configuration and enumerates packages. Returns `Detec
 4. `Cargo.toml` `[workspace]` — `members` minus `exclude`
 5. `go.work` — `use` directives (block and single-line forms)
 6. `pyproject.toml` `[tool.uv.workspace]` — `members` list
+7. `parsePolyrepo` — sibling `.git` scan, **only fires if 1–6 all miss AND no submodules exist** (last-resort fallback)
 
 All workspace managers' glob patterns are expanded via `expandWorkspaceGlobs()`, and results are deduplicated by normalized path.
 
@@ -230,9 +286,12 @@ interface DetectedPackage {
   name: string;         // From readPackageName() fallback chain
   path: string;         // Normalized relative path (no ./ or trailing /)
   type: ProjectType;    // Detected via detectProjectType() on the package dir
-  isSubmodule: boolean; // Whether the path appears in .gitmodules
+  isSubmodule: boolean; // True if path appears in .gitmodules
+  isGitRepo: boolean;   // True if discovered via parsePolyrepo (independent .git, not a submodule)
 }
 ```
+
+`isSubmodule` and `isGitRepo` are **mutually exclusive** — they correspond to two distinct runtime config schemas (`type: submodule` vs `git: true`). See "CLI ↔ Runtime Schema Parity" below.
 
 ### `expandWorkspaceGlobs()` Limitations
 
@@ -260,6 +319,23 @@ When `.gitmodules` exists, its entries are parsed and:
 - If no workspace manager is detected, submodule-only repos still return a non-null result (each submodule becomes a `DetectedPackage` with `isSubmodule: true`)
 - If workspace managers are also detected, submodule paths are merged: workspace packages at submodule paths get `isSubmodule: true`, and submodule paths not covered by any workspace manager are added as additional packages
 
+### `parsePolyrepo()` — Sibling `.git` Fallback
+
+Last-resort detector for **polyrepo** layouts (multiple independent git repos in one directory, no workspace manager, no `.gitmodules`).
+
+**Rules**:
+
+- Scans up to **2 levels deep** from `cwd` (immediate children + grandchildren). Deeper layouts must be configured manually via `config.yaml`
+- Once a directory containing `.git` is found, that path is a candidate and the scan **does not descend into it** (a package is atomic)
+- Filters out: dot-prefixed dirs (`.git`, `.next`, `.venv`, `.trellis`, …) and an explicit ignore set: `node_modules`, `target`, `dist`, `build`, `out`, `bin`, `obj`, `vendor`, `coverage`, `tmp`, `__pycache__`. Filter applies at every depth
+- `.git` may be a **directory or a file** (worktree gitlink). Detection MUST use `fs.existsSync` without `.isDirectory()`
+- Skips paths already in the submodule set (avoid double-counting)
+- Returns `null` if fewer than 2 candidates (single `.git` is more likely an accidental clone than a polyrepo)
+
+**Gating**: Only runs when all 6 prior parsers return null **and** the submodule set is empty. Workspace config always wins over polyrepo inference.
+
+> **Gotcha**: The sibling-`.git` heuristic is intentionally fired in auto-detect mode (no flag required). The existing interactive `confirm` prompt in `init.ts` is the user-intent gate. Do NOT add a separate `--monorepo`-style guard — it duplicates an existing safety mechanism.
+
 ---
 
 ## Monorepo Init Flow (`init.ts`)
@@ -268,9 +344,11 @@ When `.gitmodules` exists, its entries are parsed and:
 
 | Flag | Behavior |
 |------|----------|
-| `--monorepo` | Force monorepo mode (error if no config detected) |
+| `--monorepo` | Force monorepo mode. On detector miss, prints a checklist of all 7 markers checked + a manual `config.yaml` example showing both `type: submodule` and `git: true`, then `return`s (not `process.exit(1)`) |
 | `--no-monorepo` | Skip monorepo detection entirely |
 | _(neither)_ | Auto-detect; prompt user to confirm if packages found |
+
+> **Design Decision (do NOT revisit lightly)**: There is intentionally **no `--packages` CLI flag**. The escape hatch for users with non-standard layouts is hand-writing `packages:` in `.trellis/config.yaml` — `writeMonorepoConfig` is non-destructive and won't overwrite. Reasons: (1) `config.yaml` is the runtime source of truth, a flag would be a transient duplicate; (2) Trellis prefers declarative configuration over imperative flags. If future need pushes back, document the use case before adding the flag.
 
 ### Init Sequence (Monorepo Path)
 
@@ -285,9 +363,43 @@ When `.gitmodules` exists, its entries are parsed and:
 Non-destructive config.yaml patch:
 
 - **Reads** existing `config.yaml` (no-op if file doesn't exist yet)
-- **Skips** if `packages:` key already present (re-init safety)
-- **Appends** `packages:` block with each package's `path` and optional `type: submodule`
+- **Skips** if `packages:` key already present (re-init safety — also makes hand-written config the supported escape hatch for non-standard layouts)
+- **Appends** `packages:` block with each package's `path` and optional `type: submodule` **or** `git: true` (mutually exclusive — a package is never both a submodule and a polyrepo entry)
 - **Sets** `default_package:` to the first non-submodule package (fallback to first package)
+
+### CLI ↔ Runtime Schema Parity
+
+The TS `DetectedPackage` interface and the Python runtime config schema are coupled. When changing one, change the other.
+
+| TS field (`DetectedPackage`) | YAML key (`config.yaml` `packages.<name>`) | Python reader |
+|---|---|---|
+| `isSubmodule: true` | `type: submodule` | `get_submodule_packages()` in `.trellis/scripts/common/config.py` |
+| `isGitRepo: true` | `git: true` | `get_git_packages()` in `.trellis/scripts/common/config.py` |
+
+The Python helper `_is_true_config_value()` accepts `true` (case-insensitive string). YAML literals are emitted unquoted by `writeMonorepoConfig`. End-to-end round-trip is covered by `test/commands/init.integration.test.ts` polyrepo case.
+
+### Runtime Session Context Fallback
+
+`common/session_context.py` consumes the `git: true` runtime schema when
+injecting package Git status. The configured package list remains the primary
+source of truth.
+
+For backward compatibility with projects initialized before polyrepo detection
+or hand-created Trellis roots, session context has a bounded fallback: when the
+Trellis root is not a Git worktree and no configured package Git repositories
+are available, it may scan immediate child and grandchild directories for
+independent `.git` entries and inject those repositories' status. This fallback
+must mirror `parsePolyrepo()`:
+
+- maximum depth: two levels
+- skip dot-prefixed and generated/vendor directories
+- accept `.git` as a directory or file
+- stop descending once a child repository is found
+- require at least two discovered repositories before treating the layout as a
+  polyrepo
+
+Do not use the fallback to rewrite `config.yaml`; it is context-only. Users with
+non-standard layouts should still configure `packages:` explicitly.
 
 ### Per-Package Spec Directory Creation
 

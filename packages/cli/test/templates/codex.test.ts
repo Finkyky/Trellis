@@ -1,59 +1,42 @@
 import { describe, expect, it } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   getAllAgents,
   getAllCodexSkills,
-  getAllSkills,
   getConfigTemplate,
 } from "../../src/templates/codex/index.js";
+import { resolveAllAsSkills } from "../../src/configurators/shared.js";
+import { AI_TOOLS } from "../../src/types/ai-tools.js";
 
-const EXPECTED_SKILL_NAMES = [
-  "before-dev",
-  "brainstorm",
-  "break-loop",
-  "check",
-  "check-cross-layer",
-  "create-command",
-  "finish-work",
-  "improve-ut",
-  "integrate-skill",
-  "onboard",
-  "record-session",
-  "start",
-  "update-spec",
-];
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(__dirname, "../../../..");
 
 const EXPECTED_AGENT_NAMES = [
-  "check",
-  "implement",
-  "research",
+  "trellis-check",
+  "trellis-implement",
+  "trellis-research",
 ];
 
-describe("codex getAllSkills", () => {
-  it("returns the expected skill set", () => {
-    const skills = getAllSkills();
-    const names = skills.map((skill) => skill.name);
-    expect(names).toEqual(EXPECTED_SKILL_NAMES);
-  });
-
-  it("each skill has matching frontmatter name", () => {
-    const skills = getAllSkills();
+// Shared skills are now sourced from common/ via resolveAllAsSkills
+describe("codex shared skills (from common source)", () => {
+  it("resolves all common templates for codex context", () => {
+    const skills = resolveAllAsSkills(AI_TOOLS.codex.templateContext);
+    expect(skills.length).toBeGreaterThan(0);
     for (const skill of skills) {
-      expect(skill.content.length).toBeGreaterThan(0);
       expect(skill.content).toContain("description:");
-      const nameMatch = skill.content.match(/^name:\s*(.+)$/m);
-      expect(nameMatch?.[1]?.trim()).toBe(skill.name);
+      expect(skill.content).toContain(`name: ${skill.name}`);
     }
   });
 
-  it("does not include unsupported platform-specific syntax", () => {
-    const skills = getAllSkills();
+  it("does not include platform-specific syntax in resolved output", () => {
+    const skills = resolveAllAsSkills(AI_TOOLS.codex.templateContext);
     for (const skill of skills) {
+      // Codex uses $ prefix, not /trellis:
       expect(skill.content).not.toContain("/trellis:");
       expect(skill.content).not.toContain(".claude/");
       expect(skill.content).not.toContain(".cursor/");
-      expect(skill.content).not.toContain("Task(");
-      expect(skill.content).not.toContain("subagent_type");
-      expect(skill.content).not.toContain('model: "opus"');
     }
   });
 });
@@ -76,17 +59,9 @@ describe("codex getAllAgents", () => {
 });
 
 describe("codex getAllCodexSkills (platform-specific)", () => {
-  it("returns codex-specific skills", () => {
+  it("returns empty after parallel removal", () => {
     const skills = getAllCodexSkills();
-    const names = skills.map((skill) => skill.name);
-    expect(names).toEqual(["parallel"]);
-  });
-
-  it("codex-specific skills contain --platform codex", () => {
-    const skills = getAllCodexSkills();
-    for (const skill of skills) {
-      expect(skill.content).toContain("--platform codex");
-    }
+    expect(skills).toEqual([]);
   });
 });
 
@@ -114,5 +89,64 @@ describe("codex getConfigTemplate", () => {
     const defaultWait = Number(defaultWaitMatch?.[1]);
 
     expect(defaultWait).toBeGreaterThanOrEqual(minWait);
+  // The structured [features.multi_agent_v2] table form is only accepted by
+  // Codex CLI 0.131+. On 0.130 and earlier — including the codex CLI bundled
+  // in the Codex desktop app — it aborts the whole config load with
+  // `data did not match any variant of untagged enum FeatureToml`. Trellis
+  // no longer writes the block; this test guards against reintroducing it.
+  it("does not write a [features.multi_agent_v2] block (Codex 0.130 compat)", () => {
+    const config = getConfigTemplate();
+    expect(config.content).not.toMatch(/^\[features\.multi_agent_v2\]/m);
+  });
+});
+
+// =============================================================================
+// Issue #234 — Codex sub-agent recursion guard
+// =============================================================================
+//
+// trellis-implement / trellis-check agent toml MUST contain a hard recursion
+// guard that tells the sub-agent it is already the dispatched agent and must
+// not spawn another trellis-implement / trellis-check sub-agent. Without this,
+// SessionStart's "dispatch trellis-implement" guidance leaks into sub-agent
+// sessions and causes infinite recursion (see PRD).
+describe("codex sub-agent recursion guard (issue #234)", () => {
+  for (const name of ["trellis-implement", "trellis-check"] as const) {
+    it(`${name}.toml developer_instructions forbids spawning trellis-implement / trellis-check`, () => {
+      const tomlPath = path.join(
+        repoRoot,
+        "packages/cli/src/templates/codex/agents",
+        `${name}.toml`,
+      );
+      const content = fs.readFileSync(tomlPath, "utf-8");
+      // Hard prohibition keyword
+      expect(content).toMatch(/MUST NOT spawn/i);
+      // Mentions both sibling agent kinds explicitly
+      expect(content).toContain("trellis-implement");
+      expect(content).toContain("trellis-check");
+      // Mentions the leakage source so the reader knows why
+      expect(content).toMatch(/SessionStart|dispatch.*main session|breadcrumb/i);
+    });
+  }
+});
+
+// A-soft: codex/hooks/session-start.py READY-state guidance and <guidelines>
+// block must include a sub-agent self-exemption clause so a Codex sub-agent
+// reading the same SessionStart context realizes the dispatch instruction
+// is for the main session, not for itself.
+describe("codex session-start.py sub-agent self-exemption (A-soft)", () => {
+  const hookPath = path.join(
+    repoRoot,
+    "packages/cli/src/templates/codex/hooks/session-start.py",
+  );
+
+  it("READY-state dispatch guidance includes a sub-agent self-exemption clause", () => {
+    const content = fs.readFileSync(hookPath, "utf-8");
+    // Distinct exemption phrase (avoid colliding with the existing
+    // "User override" escape hatch).
+    expect(content).toContain("Sub-agent self-exemption");
+    // Calls out both sub-agent kinds
+    expect(content).toMatch(/trellis-implement.*trellis-check|trellis-check.*trellis-implement/s);
+    // Tells the sub-agent the dispatch does NOT apply to it
+    expect(content).toMatch(/does NOT apply|not apply/);
   });
 });

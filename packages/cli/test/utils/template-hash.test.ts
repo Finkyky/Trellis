@@ -54,6 +54,21 @@ describe("computeHash", () => {
       "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
     );
   });
+
+  it("produces same hash for CRLF and LF content (line-ending normalization)", () => {
+    // Cross-platform contract: hash must be stable regardless of host line endings.
+    // Without normalization, a file checked out on Windows (CRLF) would not
+    // match its template hash computed on Linux/macOS (LF).
+    const lf = "line1\nline2\nline3";
+    const crlf = "line1\r\nline2\r\nline3";
+    expect(computeHash(crlf)).toBe(computeHash(lf));
+  });
+
+  it("normalizes mixed CRLF/LF content", () => {
+    const mixed = "line1\r\nline2\nline3\r\n";
+    const lf = "line1\nline2\nline3\n";
+    expect(computeHash(mixed)).toBe(computeHash(lf));
+  });
 });
 
 // =============================================================================
@@ -387,20 +402,59 @@ describe("initializeHashes", () => {
     expect(count).toBe(0);
   });
 
-  it("hashes files in managed directories", () => {
-    // Create .trellis with a script and .claude with a command
+  it("hashes files in .trellis/ and tracked platform paths", () => {
+    // .trellis/ is always walked recursively. Platform paths (.claude/, etc.)
+    // are hashed only when explicitly listed in `trackedPaths` — the source-
+    // of-truth set captured by `startRecordingWrites` during init.
     fs.mkdirSync(path.join(tmpDir, ".trellis", "scripts"), { recursive: true });
-    fs.writeFileSync(path.join(tmpDir, ".trellis", "scripts", "task.py"), "print('hello')");
+    fs.writeFileSync(
+      path.join(tmpDir, ".trellis", "scripts", "task.py"),
+      "print('hello')",
+    );
 
     fs.mkdirSync(path.join(tmpDir, ".claude", "commands"), { recursive: true });
-    fs.writeFileSync(path.join(tmpDir, ".claude", "commands", "start.md"), "# Start");
+    fs.writeFileSync(
+      path.join(tmpDir, ".claude", "commands", "start.md"),
+      "# Start",
+    );
 
-    const count = initializeHashes(tmpDir);
+    const count = initializeHashes(tmpDir, {
+      trackedPaths: new Set([".claude/commands/start.md"]),
+    });
     expect(count).toBeGreaterThanOrEqual(2);
 
     const hashes = loadHashes(tmpDir);
     expect(hashes).toHaveProperty(".trellis/scripts/task.py");
     expect(hashes).toHaveProperty(".claude/commands/start.md");
+  });
+
+  it("does NOT hash platform-dir files that are not in trackedPaths", () => {
+    // Regression: blind directory walks swept user-owned runtime data
+    // (.codex/sessions/*, .claude/projects/*, user-added skills, pre-existing
+    // AGENTS.md) into the manifest, so uninstall later unlinked them.
+    // Now: only paths trellis actually wrote (recorded via writeFile) make
+    // it into the platform/root section of the manifest.
+    fs.mkdirSync(path.join(tmpDir, ".trellis"), { recursive: true });
+
+    const userSession = path.join(
+      tmpDir,
+      ".codex",
+      "sessions",
+      "2026",
+      "x.jsonl",
+    );
+    fs.mkdirSync(path.dirname(userSession), { recursive: true });
+    fs.writeFileSync(userSession, "user chat data\n");
+
+    const userAgents = path.join(tmpDir, "AGENTS.md");
+    fs.writeFileSync(userAgents, "user's own AGENTS.md\n");
+
+    // No trackedPaths -> no platform/root coverage.
+    initializeHashes(tmpDir, { trackedPaths: new Set() });
+    const hashes = loadHashes(tmpDir);
+
+    expect(hashes).not.toHaveProperty(".codex/sessions/2026/x.jsonl");
+    expect(hashes).not.toHaveProperty("AGENTS.md");
   });
 
   it("excludes workspace and tasks directories", () => {
@@ -434,5 +488,195 @@ describe("initializeHashes", () => {
     expect(hashes).not.toHaveProperty(".trellis/spec/frontend/index.md");
     expect(hashes).not.toHaveProperty(".trellis/spec/backend/index.md");
     expect(count).toBe(0);
+  });
+
+  it("collectFiles returns POSIX-normalized paths (no backslashes)", () => {
+    // Even on Windows where path.join uses `\`, our collected paths must
+    // be POSIX so they can be used as cross-platform hash keys.
+    fs.mkdirSync(path.join(tmpDir, ".trellis", "scripts", "common"), {
+      recursive: true,
+    });
+    fs.writeFileSync(
+      path.join(tmpDir, ".trellis", "scripts", "common", "task.py"),
+      "print('x')",
+    );
+
+    initializeHashes(tmpDir);
+    const hashes = loadHashes(tmpDir);
+
+    for (const key of Object.keys(hashes)) {
+      expect(key).not.toContain("\\");
+    }
+    // And confirm the expected POSIX key is present
+    expect(hashes).toHaveProperty(".trellis/scripts/common/task.py");
+  });
+
+  it("does not exclude generated update-spec skills from hashing", () => {
+    fs.mkdirSync(path.join(tmpDir, ".trellis"), { recursive: true });
+    const skillPath = path.join(
+      tmpDir,
+      ".pi",
+      "skills",
+      "trellis-update-spec",
+      "SKILL.md",
+    );
+    fs.mkdirSync(path.dirname(skillPath), { recursive: true });
+    fs.writeFileSync(skillPath, "# Update Spec");
+
+    // Old EXCLUDE_FROM_HASH had a "spec/" pattern that incorrectly matched
+    // `.pi/skills/trellis-update-spec/`. The new model doesn't use that
+    // exclusion at all for platform dirs (they're driven by trackedPaths),
+    // so as long as the path is tracked it lands in the manifest regardless
+    // of whether its name contains "spec".
+    const count = initializeHashes(tmpDir, {
+      trackedPaths: new Set([".pi/skills/trellis-update-spec/SKILL.md"]),
+    });
+    const hashes = loadHashes(tmpDir);
+
+    expect(hashes).toHaveProperty(
+      ".pi/skills/trellis-update-spec/SKILL.md",
+    );
+    expect(count).toBe(1);
+  });
+});
+
+// =============================================================================
+// Cross-platform: POSIX keys + schema v2 + legacy migration + CRLF
+// =============================================================================
+
+describe("cross-platform hash storage (POSIX keys + v2 schema)", () => {
+  let tmpDir: string;
+  const HASHES_REL = path.join(".trellis", ".template-hashes.json");
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "trellis-test-"));
+    fs.mkdirSync(path.join(tmpDir, ".trellis"), { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("updateHashes normalizes Windows-style keys to POSIX", () => {
+    const files = new Map<string, string>();
+    files.set("a\\b\\c.txt", "content");
+    updateHashes(tmpDir, files);
+
+    const loaded = loadHashes(tmpDir);
+    expect(loaded).toHaveProperty("a/b/c.txt");
+    expect(loaded).not.toHaveProperty("a\\b\\c.txt");
+
+    // Verify the on-disk JSON also has POSIX keys
+    const raw = fs.readFileSync(path.join(tmpDir, HASHES_REL), "utf-8");
+    const parsed = JSON.parse(raw);
+    expect(Object.keys(parsed.hashes)).toContain("a/b/c.txt");
+    for (const key of Object.keys(parsed.hashes)) {
+      expect(key).not.toContain("\\");
+    }
+  });
+
+  it("saveHashes writes schema v2 envelope with __version + hashes", () => {
+    saveHashes(tmpDir, { foo: "abc", "bar/baz": "def" });
+
+    const raw = fs.readFileSync(path.join(tmpDir, HASHES_REL), "utf-8");
+    const parsed = JSON.parse(raw);
+
+    expect(parsed).toHaveProperty("__version", 2);
+    expect(parsed).toHaveProperty("hashes");
+    expect(parsed.hashes).toEqual({ foo: "abc", "bar/baz": "def" });
+  });
+
+  it("saveHashes normalizes backslash keys at write time", () => {
+    saveHashes(tmpDir, { "win\\path\\file.txt": "hash1" });
+
+    const raw = fs.readFileSync(path.join(tmpDir, HASHES_REL), "utf-8");
+    const parsed = JSON.parse(raw);
+
+    expect(parsed.hashes).toHaveProperty("win/path/file.txt");
+    expect(parsed.hashes).not.toHaveProperty("win\\path\\file.txt");
+  });
+
+  it("loadHashes returns {} for legacy flat-format file (no __version)", () => {
+    // Simulate an existing user's file from before the v2 schema. Both the
+    // backslash key AND the missing schema version should trigger discard.
+    const legacy = {
+      ".trellis\\config.yaml": "deadbeef",
+      ".claude/commands/start.md": "cafebabe",
+    };
+    fs.writeFileSync(
+      path.join(tmpDir, HASHES_REL),
+      JSON.stringify(legacy, null, 2),
+    );
+
+    const loaded = loadHashes(tmpDir);
+    expect(loaded).toEqual({});
+  });
+
+  it("loadHashes returns {} for unknown __version", () => {
+    fs.writeFileSync(
+      path.join(tmpDir, HASHES_REL),
+      JSON.stringify({ __version: 999, hashes: { foo: "bar" } }),
+    );
+
+    const loaded = loadHashes(tmpDir);
+    expect(loaded).toEqual({});
+  });
+
+  it("isTemplateModified returns false when only line endings differ", () => {
+    // Write LF content, store its hash.
+    const lfContent = "first line\nsecond line\nthird line\n";
+    const filePath = path.join(tmpDir, "doc.md");
+    fs.writeFileSync(filePath, lfContent);
+
+    updateHashes(tmpDir, new Map([["doc.md", lfContent]]));
+    const hashes = loadHashes(tmpDir);
+
+    // Now overwrite the same file with CRLF version of identical content.
+    const crlfContent = "first line\r\nsecond line\r\nthird line\r\n";
+    fs.writeFileSync(filePath, crlfContent);
+
+    expect(isTemplateModified(tmpDir, "doc.md", hashes)).toBe(false);
+  });
+
+  it("legacy file is discarded then initializeHashes regenerates v2", () => {
+    // Plant a legacy flat-format hashes file.
+    fs.writeFileSync(
+      path.join(tmpDir, HASHES_REL),
+      JSON.stringify({ ".trellis\\config.yaml": "deadbeef" }),
+    );
+
+    // Stage some real files to pick up.
+    fs.mkdirSync(path.join(tmpDir, ".trellis", "scripts"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, ".trellis", "scripts", "task.py"),
+      "print('hello')",
+    );
+
+    initializeHashes(tmpDir);
+
+    const raw = fs.readFileSync(path.join(tmpDir, HASHES_REL), "utf-8");
+    const parsed = JSON.parse(raw);
+
+    expect(parsed.__version).toBe(2);
+    // Legacy bogus key is gone
+    expect(parsed.hashes).not.toHaveProperty(".trellis\\config.yaml");
+    expect(parsed.hashes).not.toHaveProperty(".trellis/config.yaml");
+    // Newly hashed file is present with POSIX key
+    expect(parsed.hashes).toHaveProperty(".trellis/scripts/task.py");
+  });
+
+  it("removeHash and renameHash work with backslash inputs", () => {
+    saveHashes(tmpDir, { "a/b.txt": "hash1", "c/d.txt": "hash2" });
+
+    // Caller passes backslashes — should still find/remove the POSIX key.
+    removeHash(tmpDir, "a\\b.txt");
+    let loaded = loadHashes(tmpDir);
+    expect(loaded).not.toHaveProperty("a/b.txt");
+    expect(loaded).toHaveProperty("c/d.txt", "hash2");
+
+    renameHash(tmpDir, "c\\d.txt", "e\\f.txt");
+    loaded = loadHashes(tmpDir);
+    expect(loaded).not.toHaveProperty("c/d.txt");
+    expect(loaded).toHaveProperty("e/f.txt", "hash2");
   });
 });

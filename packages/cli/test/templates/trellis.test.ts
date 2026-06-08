@@ -5,26 +5,16 @@ import {
   commonPaths,
   commonDeveloper,
   commonGitContext,
-  commonWorktree,
   commonTaskQueue,
   commonTaskUtils,
-  commonPhase,
-  commonRegistry,
+  commonActiveTask,
   commonCliAdapter,
-  multiAgentInit,
-  multiAgentStart,
-  multiAgentCleanup,
-  multiAgentStatus,
-  multiAgentCreatePr,
-  multiAgentPlan,
   getDeveloperScript,
   initDeveloperScript,
   taskScript,
   getContextScript,
   addSessionScript,
-  createBootstrapScript,
   workflowMdTemplate,
-  worktreeYamlTemplate,
   gitignoreTemplate,
   getAllScripts,
 } from "../../src/templates/trellis/index.js";
@@ -40,28 +30,28 @@ describe("trellis template constants", () => {
     commonPaths,
     commonDeveloper,
     commonGitContext,
-    commonWorktree,
     commonTaskQueue,
     commonTaskUtils,
-    commonPhase,
-    commonRegistry,
+    commonActiveTask,
     commonCliAdapter,
-    multiAgentInit,
-    multiAgentStart,
-    multiAgentCleanup,
-    multiAgentStatus,
-    multiAgentCreatePr,
-    multiAgentPlan,
     getDeveloperScript,
     initDeveloperScript,
     taskScript,
     getContextScript,
     addSessionScript,
-    createBootstrapScript,
     workflowMdTemplate,
-    worktreeYamlTemplate,
     gitignoreTemplate,
   };
+
+  function inProgressBreadcrumb(): string {
+    const inProgressMatch = /\[workflow-state:in_progress\]([\s\S]*?)\[\/workflow-state:in_progress\]/.exec(
+      workflowMdTemplate,
+    );
+    if (!inProgressMatch) {
+      throw new Error("in_progress breadcrumb block must exist in workflow.md");
+    }
+    return inProgressMatch[1];
+  }
 
   it("all templates are non-empty strings", () => {
     for (const [name, content] of Object.entries(allTemplates)) {
@@ -74,6 +64,7 @@ describe("trellis template constants", () => {
     const pyScripts = [
       commonInit,
       commonPaths,
+      commonActiveTask,
       getDeveloperScript,
       taskScript,
     ];
@@ -93,6 +84,47 @@ describe("trellis template constants", () => {
 
   it("workflowMdTemplate is markdown", () => {
     expect(workflowMdTemplate).toContain("#");
+  });
+
+  it("[issue-225] workflow.md in_progress breadcrumb has class-2 sub-agent dispatch protocol", () => {
+    // The in_progress breadcrumb instructs the main agent to prefix
+    // dispatch prompts with "Active task: <path>" on class-2 platforms.
+    // Without this line, codex/copilot/gemini/qoder sub-agents cannot
+    // find the active task (no PreToolUse hook to inject context).
+    const block = inProgressBreadcrumb();
+    expect(block).toContain("Active task:");
+    expect(block.toLowerCase()).toContain("class-2");
+    expect(block).toMatch(/codex|copilot|gemini|qoder/);
+  });
+
+  it("[issue-237] workflow.md in_progress breadcrumb self-exempts implement/check sub-agents", () => {
+    // The in_progress breadcrumb may be injected into sub-agent turns on some
+    // hosts, so its main-session dispatch guidance must not recursively apply
+    // to a sub-agent that is already doing the requested work.
+    const block = inProgressBreadcrumb();
+    expect(block).toContain("Main-session default");
+    expect(block).toContain("Sub-agent self-exemption");
+    expect(block).toContain("already running as `trellis-implement`");
+    expect(block).toContain("do NOT spawn another `trellis-implement`");
+    expect(block).toContain("already running as `trellis-check`");
+    expect(block).toContain("do NOT spawn another `trellis-check`");
+    expect(block).toContain("main session only");
+  });
+
+  it("[issue-237] workflow.md Phase 2 dispatch steps require prompt recursion guards", () => {
+    expect(workflowMdTemplate).toContain("**Dispatch prompt guard**");
+    expect(workflowMdTemplate).toContain(
+      "already the `trellis-implement` sub-agent",
+    );
+    expect(workflowMdTemplate).toContain(
+      "not spawn another `trellis-implement` / `trellis-check`",
+    );
+    expect(workflowMdTemplate).toContain(
+      "already the `trellis-check` sub-agent",
+    );
+    expect(workflowMdTemplate).toContain(
+      "not spawn another `trellis-check` / `trellis-implement`",
+    );
   });
 
   it("gitignoreTemplate contains ignore patterns", () => {
@@ -116,9 +148,9 @@ describe("getAllScripts", () => {
     expect(scripts.has("__init__.py")).toBe(true);
     expect(scripts.has("common/__init__.py")).toBe(true);
     expect(scripts.has("common/paths.py")).toBe(true);
+    expect(scripts.has("common/active_task.py")).toBe(true);
     expect(scripts.has("task.py")).toBe(true);
     expect(scripts.has("get_developer.py")).toBe(true);
-    expect(scripts.has("multi_agent/start.py")).toBe(true);
   });
 
   it("has at least one entry", () => {
@@ -138,5 +170,12 @@ describe("getAllScripts", () => {
     expect(scripts.get("__init__.py")).toBe(scriptsInit);
     expect(scripts.get("common/__init__.py")).toBe(commonInit);
     expect(scripts.get("task.py")).toBe(taskScript);
+  });
+
+  it("does not contain multi_agent entries", () => {
+    const scripts = getAllScripts();
+    for (const [key] of scripts) {
+      expect(key, `${key} should not be a multi_agent script`).not.toContain("multi_agent");
+    }
   });
 });

@@ -6,7 +6,7 @@
 
 ## Overview
 
-All workflow scripts are written in **Python 3.10+** for cross-platform compatibility. Scripts use only the standard library (no external dependencies).
+All workflow scripts target **Python 3.9+** for cross-platform compatibility (matches macOS system `python3`; covers Ubuntu 22.04 LTS and newer). Scripts use only the standard library (no external dependencies). PEP 604 union annotations (`str | None`) are allowed only when the file declares `from __future__ import annotations` — see the Cross-Platform Compatibility section below.
 
 ---
 
@@ -24,35 +24,23 @@ All workflow scripts are written in **Python 3.10+** for cross-platform compatib
 │   ├── git.py            # run_git() — git command wrapper
 │   ├── types.py          # TaskData (TypedDict), TaskInfo (dataclass), AgentRecord
 │   ├── tasks.py          # load_task(), iter_active_tasks() — typed task access
+│   ├── active_task.py    # Session-scoped active task resolver
 │   ├── task_utils.py     # resolve_task_dir(), run_task_hooks()
 │   ├── task_store.py     # Task CRUD (create, archive, set-branch, etc.)
 │   ├── task_context.py   # JSONL context management (init-context, add-context)
 │   ├── task_queue.py     # Task queue CRUD
-│   ├── phase.py          # Multi-agent phase tracking
-│   ├── registry.py       # Agent registry management
 │   ├── config.py         # Config reader (config.yaml, hooks)
-│   ├── worktree.py       # Git worktree utilities + YAML parser
 │   ├── cli_adapter.py    # Multi-platform CLI abstraction
 │   ├── git_context.py    # Entry shim → session_context + packages_context
 │   ├── session_context.py    # Session context generation (text/json/record)
 │   └── packages_context.py  # Package discovery and context
 ├── hooks/                # Lifecycle hook scripts (project-specific)
 │   └── linear_sync.py    # Example: sync tasks to Linear
-├── multi_agent/          # Multi-agent pipeline scripts
-│   ├── __init__.py
-│   ├── start.py          # Start worktree agent
-│   ├── status.py         # Entry shim → status_display + status_monitor
-│   ├── status_display.py # Agent status formatting and display
-│   ├── status_monitor.py # Log parsing and process monitoring
-│   ├── plan.py           # Start plan agent
-│   ├── cleanup.py        # Cleanup worktree
-│   └── create_pr.py      # Create PR from task
 ├── task.py               # Entry shim → task_store + task_context
 ├── get_context.py        # Session context retrieval
 ├── init_developer.py     # Developer initialization
 ├── get_developer.py      # Get current developer
-├── add_session.py        # Session recording
-└── create_bootstrap.py   # Bootstrap task creation
+└── add_session.py        # Session recording
 ```
 
 ---
@@ -69,10 +57,10 @@ Three tiers:
 |------|---------|------|
 | **Foundation** | `io.py`, `log.py`, `git.py`, `paths.py` | Zero internal deps, used by everything |
 | **Domain** | `types.py`, `tasks.py`, `task_store.py`, `task_context.py`, `task_utils.py` | Task data model and operations |
-| **Infra** | `phase.py`, `registry.py`, `config.py`, `worktree.py`, `cli_adapter.py` | Multi-agent pipeline support |
+| **Infra** | `config.py`, `cli_adapter.py` | Platform abstraction and config |
 | **Context** | `session_context.py`, `packages_context.py`, `git_context.py` (shim) | Output generation |
 
-### Entry Scripts (`*.py`, `multi_agent/*.py`)
+### Entry Scripts (`*.py`)
 
 CLI tools that users run directly. Include docstring with usage.
 
@@ -100,19 +88,6 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 ```
-
-### Bootstrap Shim (`multi_agent/_bootstrap.py`)
-
-Scripts in `multi_agent/` can't directly `from common.xxx import yyy` because Python's module resolution doesn't know about the parent `scripts/` directory. The `_bootstrap.py` shim adds it to `sys.path`:
-
-```python
-# Every multi_agent script must start with this:
-import _bootstrap  # noqa: F401 — adds parent scripts/ dir to sys.path
-
-from common.paths import get_repo_root  # now works
-```
-
-**Why not `sys.path.insert` inline?** The bootstrap shim is a single file, tested once, imported everywhere. Inline `sys.path.insert` was duplicated in every `multi_agent/*.py` file and easy to get wrong.
 
 ---
 
@@ -203,6 +178,81 @@ def run_command(
     return result.returncode, result.stdout, result.stderr
 ```
 
+### Optional Advisory Checks in Session Scripts
+
+#### 1. Scope / Trigger
+
+Use this contract when a generated `.trellis/scripts/` module performs an
+advisory check during hook/session context generation, such as checking whether
+a Trellis update is available. These checks must never block context output.
+
+#### 2. Signatures
+
+```python
+def _fetch_tool_output() -> str | None: ...
+def _extract_advisory_value(output: str) -> str | None: ...
+def _resolve_advisory_value() -> str | None: ...
+def _marker_path(repo_root: Path) -> Path: ...
+def _mark_attempted(repo_root: Path) -> bool: ...
+```
+
+#### 3. Contracts
+
+- Prefer reusing existing local CLI behavior over duplicating registry/API logic.
+- Local advisory commands use `subprocess.run(..., capture_output=True,
+  text=True, encoding="utf-8", errors="replace",
+  timeout=<short timeout>)`.
+- Marker files live under `.trellis/.runtime/` and are keyed by the current
+  Trellis session identity when available.
+- Marker writes are best-effort: failure to write must not fail context output.
+
+#### 4. Validation & Error Matrix
+
+| Condition | Behavior |
+|-----------|----------|
+| Local command returns valid value | Compare/use value and write marker |
+| Local command fails | Print nothing and do not write marker |
+| Value parses as invalid | Print nothing; marker may be written to avoid repeat noisy work |
+| Marker already exists | Skip all probes and print nothing |
+
+#### 5. Good / Base / Bad Cases
+
+- Good: `trellis --version` prints an existing CLI update hint or final version,
+  project `.version` is `0.5.0`, so context prints the update hint once.
+- Base: `trellis --version` returns `0.5.9`; no registry parsing is needed.
+- Bad: a failed local command writes the marker before any usable value is
+  resolved, hiding a later successful check in the same session.
+
+#### 6. Tests Required
+
+- Newer value prints the hint and includes the generated context body.
+- Equal/newer current project version prints no hint.
+- Failed lookup prints no hint and does not burn the once-per-session marker.
+- Existing `trellis --version` update output is parsed and normalized.
+- Non-default modes (`--json`, record, packages, phase) do not call the
+  advisory check.
+
+#### 7. Wrong vs Correct
+
+```python
+# Wrong: burns the marker before knowing whether the check produced a value.
+if not _mark_attempted(repo_root):
+    return None
+latest = _fetch_primary_value()
+if not latest:
+    return None
+```
+
+```python
+# Correct: skip only if a previous successful/decisive attempt wrote a marker.
+if _marker_path(repo_root).exists():
+    return None
+latest = _resolve_advisory_value()
+if not latest:
+    return None
+_mark_attempted(repo_root)
+```
+
 ---
 
 ## Shared Module API Reference
@@ -244,6 +294,165 @@ def run_git(args: list[str], cwd: Path | None = None) -> tuple[int, str, str]
 - Uses `encoding="utf-8", errors="replace"` for subprocess output
 - Returns `(1, "", error_message)` on exception (never raises)
 - Backward-compatible alias in `git_context.py`: `_run_git_command = run_git`
+
+### `common/active_task.py` — Active Task Resolver
+
+All current-task consumers must use the active task resolver instead of reading
+`.trellis/.current-task` directly. The resolver is the single source of truth
+for session/window scoped task state:
+
+1. Derive a context key from platform input, `TRELLIS_CONTEXT_ID`, a
+   platform-native session environment variable when the host exports one, or
+   a Cursor shell ticket for a matching AI-run `task.py` command.
+2. Read `.trellis/.runtime/sessions/<session-key>.json`.
+3. If no context key or no session task is present, return no active task.
+4. If a session task exists but the task directory is stale, return stale
+   session state.
+
+| Function | Purpose |
+|----------|---------|
+| `resolve_context_key(platform_input, platform)` | Accepts `session_id` / `sessionId` / `sessionID`, Cursor `conversation_id`, and transcript path fallbacks |
+| `resolve_active_task(repo_root, platform_input, platform)` | Returns an `ActiveTask` with `task_path`, `source_type`, `context_key`, and `stale` |
+| `set_active_task(...)` | Writes session runtime state when a context key exists; returns `None` without a context key |
+| `clear_active_task(...)` | Deletes the current session file; returns no active task without a context key |
+
+`TRELLIS_CONTEXT_ID` is a context-key override for subprocesses. It is not a
+second task pointer and must never store a task path. A plain AI-run shell
+command cannot infer the current conversation/window unless the host process
+exports session identity in its environment or the command is launched with
+`TRELLIS_CONTEXT_ID`; without that identity, `task.py start` fails and explains
+how to provide a session runtime. For Claude Code, SessionStart receives
+`CLAUDE_ENV_FILE`; Trellis must append `export TRELLIS_CONTEXT_ID=<context-key>`
+there so later Bash tools inherit the same session identity. For OpenCode,
+`tool.execute.before` must prefix Bash commands with
+`TRELLIS_CONTEXT_ID` from plugin session identity when the command does not
+already set it, because some TUI sessions do not expose `OPENCODE_RUN_ID` to
+Bash. The prefix must match the host shell: use
+`export TRELLIS_CONTEXT_ID=<context-key>;` for POSIX shells and
+`$env:TRELLIS_CONTEXT_ID = '<context-key>';` for Windows PowerShell. Keep the
+assignment before the user's command so compound commands like
+`task.py start && task.py current` keep the same context for every command in
+the Bash invocation.
+Do not choose this prefix from OS alone. On Windows, Git Bash / MSYS2 still
+parse POSIX syntax, so OpenCode must treat `MSYSTEM`, `MINGW_PREFIX`,
+`OSTYPE=msys|mingw|cygwin`, `SHELL=...bash`, or `OPENCODE_GIT_BASH_PATH` as
+POSIX-shell signals and use the PowerShell prefix only when no such signal is
+present.
+For Cursor, `session-start.py` is not a reliable shell environment bridge.
+Instead, `inject-shell-session-context.py` must run on `beforeShellExecution`
+and write a short-lived `.trellis/.runtime/cursor-shell/*.json` ticket for
+matching `task.py start/current/finish` commands. The active task resolver may
+consume the ticket only when no env identity exists, the current `task.py`
+subcommand matches the ticket, the ticket is fresh, and exactly one context key
+matches. This keeps Cursor task state per conversation without accepting a
+global pointer.
+For Pi Agent, the generated TypeScript extension must read the real session id
+from `ctx.sessionManager.getSessionId()` and mutate Bash tool calls in
+`tool_call` by prefixing `export TRELLIS_CONTEXT_ID=<context-key>;`. The Python
+resolver then sees the explicit `TRELLIS_CONTEXT_ID` override; Pi does not need
+a `.current-task` fallback or a Python hook directory.
+
+#### Scenario: Active Task Runtime Lifecycle
+
+##### 1. Scope / Trigger
+
+- Trigger: any change to `task.py create/start/current/finish`, hook
+  current-task injection, plugin active-task display, or platform session
+  identity handling.
+- Reason: current-task state is a cross-platform runtime contract. A direct
+  `.current-task` read or an eager `.runtime` write can reintroduce multi-window
+  task pollution.
+
+##### 2. Signatures
+
+- `python3 .trellis/scripts/task.py create "<title>" [--slug <slug>]`
+- `python3 .trellis/scripts/task.py start <task-dir>`
+- `python3 .trellis/scripts/task.py current [--source]`
+- `python3 .trellis/scripts/task.py finish`
+- `resolve_active_task(repo_root, platform_input=None, platform=None) -> ActiveTask`
+- `set_active_task(task_path, repo_root, platform_input=None, platform=None) -> ActiveTask | None`
+- `clear_active_task(repo_root, platform_input=None, platform=None) -> ActiveTask`
+
+##### 3. Contracts
+
+- `task.py create` creates only task-owned files under
+  `.trellis/tasks/<date-slug>/`. It must not create `.trellis/.runtime/` and
+  must not write `.trellis/.current-task`.
+- `task.py start` writes session-local state only when a context key is
+  available. Otherwise it exits non-zero and must not write
+  `.trellis/.current-task`.
+- Session state is stored at
+  `.trellis/.runtime/sessions/<session-key>.json`. The runtime directory is
+  created lazily by the JSON write path.
+- Context filenames are derived from the resolved context key:
+  - `TRELLIS_CONTEXT_ID=session-demo` -> `session-demo.json`
+  - `CODEX_SESSION_ID=native-a` -> `codex_native-a.json`
+  - `CODEX_THREAD_ID=thread-a` -> `codex_thread-a.json`
+  - `OPENCODE_RUN_ID=run-a` -> `opencode_run-a.json`
+  - OpenCode plugin `sessionID=oc-a` -> `opencode_oc-a.json`
+  - `CURSOR_SESSION_ID=cursor-a` -> `cursor_cursor-a.json`
+  - transcript fallback -> `<platform>_transcript_<sha256-prefix>.json`
+- `TRELLIS_CONTEXT_ID` is already a complete context key. Do not prepend a
+  platform name to it.
+- `task.py finish` deletes only the current session file. Without a
+  context key it returns "no current task" and must not delete
+  `.trellis/.current-task`.
+- `task.py archive <task>` deletes every runtime session file whose
+  `current_task` points at the archived task before moving the task directory.
+
+##### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|-----------|-------------------|
+| `create` succeeds | Task files exist; no `.runtime`; no `.current-task` |
+| `start` without context key | Fails; no `.runtime`; no `.current-task`; hints IDE/session identity or `TRELLIS_CONTEXT_ID` |
+| `start` with `TRELLIS_CONTEXT_ID` | Writes `.runtime/sessions/<key>.json`; does not require `.current-task` |
+| `current --source` with same context key | Prints `Source: session:<key>` |
+| `current --source` without context | Prints `(none)` and `Source: none` |
+| stale session task + stale `.current-task` exists | Returns stale session state; no `.current-task` fallback |
+| `finish` with context key and active task | Deletes `.runtime/sessions/<key>.json` |
+| `finish` without context key | Returns no current task; does not delete `.current-task` |
+| `archive` for a task referenced by runtime sessions | Deletes those session files even when `finish` was skipped |
+
+##### 5. Good/Base/Bad Cases
+
+- Good: Cursor provides `conversation_id`; resolver writes
+  `cursor_<conversation-id>.json` and hook/plugin output includes the
+  session source.
+- Base: A normal shell command has no session env; `task.py start` fails with
+  a session identity hint and does not create `.current-task`.
+- Bad: `task.py create` pre-creates `.runtime`, or any resolver reads/writes
+  `.trellis/.current-task` as an active-task fallback.
+
+##### 6. Tests Required
+
+- Regression tests for `create` producing no runtime/current-task state.
+- Regression tests for `start` without a context key failing without creating
+  `.current-task`.
+- Regression tests for `TRELLIS_CONTEXT_ID` and platform-native env keys.
+- Hook/plugin tests proving the resolver source is surfaced.
+- Stale session tests proving no `.current-task` fallback occurs when the session task
+  path is stale.
+
+##### 7. Wrong vs Correct
+
+###### Wrong
+
+```python
+# Wrong: silently creates or deletes repo-global task state when no session
+# identity exists.
+if not resolve_context_key():
+    write_file(".trellis/.current-task", task_path)
+```
+
+###### Correct
+
+```python
+context_key = resolve_context_key(platform_input, platform)
+if not context_key:
+    return ActiveTask(None, "none")
+clear_session_context(context_key)
+```
 
 ### `common/types.py` — Typed Data Model
 
@@ -299,6 +508,16 @@ Replaces 9 scattered task iteration patterns with a single typed API.
 | `children_progress` | `(children, all_statuses) -> str` | Format `" [2/3 done]"` or `""` |
 
 **Sorting guarantee**: `iter_active_tasks` uses `sorted(tasks_dir.iterdir())` — same order as the filesystem `ls` output. This is frozen behavior; changing the sort would break display consistency.
+
+#### Parent-child invariant (children list)
+
+`children` on a parent task is the **historical** list of subtask dir names — it must NOT be pruned when a child is archived. The contract:
+
+- `cmd_archive` keeps the archived child's name in the parent's `children`.
+- `children_progress` treats any `child` not present in `all_statuses` (i.e. no longer in the active tasks dir) as **completed**, since `cmd_archive` always sets `status=completed` before moving the directory.
+- Renderers that walk children (e.g. `task.py:_print_task`) must guard with `if child_name in all_tasks` so archived entries are silently skipped, not shown.
+
+**Why**: pruning on archive caused `[1/6 done]` → `[0/5 done]` regression — both numerator and denominator dropped, hiding completed work. The single field `children` serves two readers (parent-to-child traversal and progress %); both must agree on its meaning. If you ever need an "active children only" view, derive it via `[c for c in t.children if c in all_statuses]`, do not mutate the field.
 
 ---
 
@@ -394,25 +613,105 @@ if sys.platform == "win32":
 | `io.TextIOWrapper(sys.stdout.buffer, ...)` | ❌ No | Creates wrapper, doesn't fix underlying encoding |
 | `PYTHONIOENCODING=utf-8` env var | ⚠️ Partial | Only works if set **before** Python starts |
 
-### CRITICAL: Always Use `python3` Explicitly
+### CRITICAL: PEP 604 Annotations Require `from __future__ import annotations`
 
-Windows does not support shebang (`#!/usr/bin/env python3`). Always document invocation with explicit `python3`:
+Any distributed Python template file (`templates/**/*.py` — both hooks and scripts) that uses PEP 604 union syntax (`str | None`, `dict | None`, etc.) in annotations **must** start with:
+
+```python
+from __future__ import annotations
+```
+
+immediately after the module docstring.
+
+**Why it matters**: The `{{PYTHON_CMD}}` placeholder resolves to `python` on
+Windows and `python3` on macOS/Linux. `trellis init` probes that same
+platform-selected command and soft-warns if it resolves to Python < 3.9, while
+hooks are invoked by the host AI CLI (Claude Code, Cursor, enterprise-forked CC
+distributions, etc.) in a subprocess whose **PATH may differ from the user's
+shell PATH**. Concrete failure mode observed in the field:
+
+- User's terminal `python3 --version` → 3.11.12 (homebrew / pyenv)
+- The AI CLI's hook subprocess inherits a minimal PATH (no `/opt/homebrew/bin`), so `python3` resolves to `/usr/bin/python3` → macOS system 3.9
+- `def f(x: str | None)` evaluates `str | None` at def-time on 3.9 → `TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'`
+- Hook crashes silently; user sees `SessionStart hook error` in debug log with no actionable hint
+
+`from __future__ import annotations` makes all annotations lazy strings (PEP 563), so PEP 604 syntax in annotations works on Python 3.7+. Runtime union usage (e.g. `isinstance(x, int | str)`) is **not** rescued by this import — avoid it in distributed templates.
+
+**Real-world incident**: `shared-hooks/session-start.py` and `shared-hooks/inject-subagent-context.py` lacked this import while `statusline.py` and the copilot/codex copies had it. The inconsistency went undetected until a user on an enterprise-forked Claude Code distribution hit the PEP 604 crash on SessionStart. Fix commit: `7e58432` (2026-04).
+
+#### DO
+
+```python
+#!/usr/bin/env python3
+"""Hook description."""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+def handler(x: str | None) -> dict | None:  # lazy annotation — safe on 3.9
+    ...
+```
+
+#### DON'T
+
+```python
+# BAD — annotations evaluated eagerly, crashes on Python < 3.10
+def handler(x: str | None) -> dict | None:
+    ...
+```
+
+```python
+# BAD — __future__ import does NOT rescue runtime union
+def check(x):
+    if isinstance(x, int | str):  # still crashes on 3.9
+        ...
+```
+
+#### Audit Check
+
+Run this before releasing any change that adds a new `.py` file to `templates/`:
+
+```bash
+cd packages/cli/src/templates
+for f in $(find . -name "*.py"); do
+    if grep -qE '^[^#]*: [A-Za-z_].*\|.*(None|[A-Z])|->.*\|' "$f" \
+       && ! grep -q "from __future__ import annotations" "$f"; then
+        echo "MISSING: $f"
+    fi
+done
+```
+
+Exit with 0 matches means all PEP 604 users have the future import.
+
+---
+
+### CRITICAL: Keep User-Facing Python Commands Platform-Aware
+
+Windows does not support shebang (`#!/usr/bin/env python3`). For any
+user-facing invocation string (docstrings, help text, error messages), either:
+
+- describe the rule explicitly: `python` on Windows, `python3` elsewhere
+- or render the command via the same placeholder / helper used at init time
+
+Do not hardcode `python3` into docs and then run `python` internally on
+Windows; that drift causes misleading bootstrap instructions.
 
 ```python
 # In docstrings
 """
 Usage:
-    python3 task.py create "My Task"
-    python3 task.py list --mine
+    python task.py create "My Task"      # Windows
+    python3 task.py create "My Task"     # macOS/Linux
 """
 
 # In error messages
-print("Usage: python3 task.py <command>")
-print("Run: python3 ./.trellis/scripts/init_developer.py <name>")
+print("Usage: python on Windows, python3 elsewhere")
+print("Run: {{PYTHON_CMD}} ./.trellis/scripts/init_developer.py <name>")
 
 # In help text
 print("Next steps:")
-print("  python3 task.py start <dir>")
+print("  {{PYTHON_CMD}} task.py start <dir>")
 ```
 
 ### Path Separators
@@ -530,39 +829,179 @@ TEAM = CONFIG.get("linear", {}).get("team", "")
 
 ---
 
-## Auto-Commit Pattern
+## Git interaction in scripts
 
-Scripts that modify `.trellis/` tracked files should auto-commit their changes to keep the workspace clean. Use a `--no-commit` flag for opt-out.
+Scripts that auto-stage / auto-commit `.trellis/` paths must go through the
+canonical `common/safe_commit.py` helpers. Hand-rolled `git add -A` /
+`git add -f` calls have caused real-user data incidents and are forbidden.
 
-### Convention: Auto-Commit After Mutation
+### Canonical helpers
+
+| Helper | Source | Purpose |
+|---|---|---|
+| `safe_trellis_paths_to_add(repo_root)` | `templates/trellis/scripts/common/safe_commit.py:safe_trellis_paths_to_add` | Path whitelist for `add_session.py` — journal files, index.md, active task dirs, archive dir |
+| `safe_archive_paths_to_add(repo_root)` | `templates/trellis/scripts/common/safe_commit.py:safe_archive_paths_to_add` | Path whitelist for `task.py archive` — archive subtree + sibling task dirs (so deletions get recorded) |
+| `safe_git_add(paths, repo_root)` | `templates/trellis/scripts/common/safe_commit.py:safe_git_add` | Plain `git add -- <paths>`; never `-f`. Returns `(success, used_force=False, stderr)` |
+| `print_gitignore_warning(paths)` | `templates/trellis/scripts/common/safe_commit.py:print_gitignore_warning` | Single source of truth for the "ignored by .gitignore" warning, including the AI-defense negative example |
+| `get_session_auto_commit(repo_root)` | `templates/trellis/scripts/common/config.py:get_session_auto_commit` | Reads `session_auto_commit` from `.trellis/config.yaml` (default `True`) |
+
+Callers using this contract: `add_session.py:_auto_commit_workspace` and
+`task_store.py:_auto_commit_archive` (invoked from `task.py archive`).
+
+### Anti-pattern: AI-invented `git add -f .trellis/`
+
+A real user incident (pre-0.5.10): a project's `.gitignore` listed `.trellis/`
+as a company-wide template. When the auto-commit hit `ignored by .gitignore`,
+the AI agent driving the workflow "fixed" the failure by retrying with
+`git add -f .trellis/`. That fan-out included every ignored subtree
+(`.trellis/.backup-*/`, `.trellis/worktrees/`, `.trellis/.template-hashes.json`,
+`.trellis/.runtime/`), committing 548 files / 83474 lines of caches and
+backups before anyone noticed.
+
+The root cause is generic fallback hint text in scripts, e.g. "run
+`git add .trellis && git commit`" — AI agents see "ignored by" and reinvent
+`-f` to bypass `.gitignore`, even when no human author would do that.
+
+### Anti-pattern: scripts auto-`-f`-ing on narrow paths
+
+0.5.10's first attempt at fixing the AI-invented `-f` was to have scripts
+themselves run `git add -f` against a narrow whitelist (journal files, task
+dirs). That was reverted in 0.5.11 because it still violates user `.gitignore`
+intent — putting `.trellis/` in `.gitignore` is an explicit signal "do not
+track this." A script silently bypassing that with `-f`, even on a narrow
+path list, is unacceptable.
+
+The wider-grain `git add -f .trellis/` stays forbidden, AND the narrow-grain
+auto `-f` is gone. There is no `-f` retry anywhere in the auto-commit path.
+
+### Pattern: path whitelist + plain `git add` + warn-and-skip
 
 ```python
-def _auto_commit(scope: str, message: str, repo_root: Path) -> None:
-    """Stage and commit changes in a specific .trellis/ subdirectory."""
-    subprocess.run(["git", "add", "-A", scope], cwd=repo_root, capture_output=True)
-    # Check if there are staged changes
-    result = subprocess.run(
-        ["git", "diff", "--cached", "--quiet", "--", scope],
-        cwd=repo_root,
-    )
-    if result.returncode == 0:
-        print("[OK] No changes to commit.", file=sys.stderr)
+# add_session.py / task.py archive
+from common.safe_commit import (
+    safe_trellis_paths_to_add,
+    safe_git_add,
+    print_gitignore_warning,
+)
+from common.config import get_session_auto_commit
+
+def _auto_commit_workspace(repo_root: Path) -> None:
+    if not get_session_auto_commit(repo_root):
+        print("[OK] session_auto_commit: false — skipping git stage/commit.",
+              file=sys.stderr)
         return
-    commit_result = subprocess.run(
-        ["git", "commit", "-m", message],
-        cwd=repo_root, capture_output=True, text=True,
-    )
-    if commit_result.returncode == 0:
-        print(f"[OK] Auto-committed: {message}", file=sys.stderr)
-    else:
-        print(f"[WARN] Auto-commit failed: {commit_result.stderr.strip()}", file=sys.stderr)
+
+    paths = safe_trellis_paths_to_add(repo_root)  # canonical whitelist
+    if not paths:
+        return
+
+    success, _, err = safe_git_add(paths, repo_root)  # plain `git add --`, no -f
+    if not success:
+        if "ignored by" in err.lower():
+            print_gitignore_warning(paths)        # canonical warning text
+        else:
+            print(f"[WARN] git add failed: {err.strip()}", file=sys.stderr)
+        return
+
+    # ... `git diff --cached --quiet` then `git commit -m <message>`
 ```
 
-**Scripts using this pattern**:
-- `add_session.py` — commits `.trellis/workspace` + `.trellis/tasks` after recording a session
-- `task.py archive` — commits `.trellis/tasks` after archiving a task
+Behavior contract:
 
-**Always add `--no-commit` flag** for scripts that auto-commit, so users can opt out.
+- Whitelist is built only from paths that exist on disk; never pass
+  non-existent arguments to `git`.
+- `safe_git_add` runs `git add -- <paths>` exactly once. No retry, no `-f`.
+- On `ignored by` failure → call `print_gitignore_warning(paths)` and return.
+  The journal / archive files are still on disk; only the git step is skipped.
+- On any other failure → log the stderr and return. Do not re-attempt with
+  different flags.
+- `used_force` in `safe_git_add`'s return tuple is kept for signature
+  compatibility but is always `False`. Do not introduce a code path that
+  sets it to `True`.
+
+### Pattern: `session_auto_commit` config gate (added 0.5.11)
+
+```yaml
+# .trellis/config.yaml
+# session_auto_commit: true   # default — auto-stage + auto-commit
+session_auto_commit: false    # files written, git left untouched
+```
+
+- `true` (default) — `add_session.py` and `task.py archive` stage + commit
+  via the helpers above.
+- `false` — early-return before touching git. Files are still written; the
+  user runs `git status` / `git add` / `git commit` themselves.
+- Always read via `get_session_auto_commit(repo_root)`. Do not write a custom
+  YAML reader (see "Config helpers" below).
+
+`session_auto_commit: false` is the recommended escape hatch for users whose
+`.gitignore` intentionally excludes `.trellis/` and who want session data kept
+local-only.
+
+### Pattern: warning text as canonical AI-defense surface
+
+`print_gitignore_warning` in `templates/trellis/scripts/common/safe_commit.py`
+is the **single source of truth** for the "ignored by .gitignore" warning.
+Any script that hits this failure mode must call this helper rather than
+inlining a copy.
+
+The warning text MUST contain the literal forbidden command as a negative
+example so any AI rereading the log does not reinvent the bug:
+
+```
+[WARN] Do NOT use `git add -f .trellis/` — it pulls in backups, worktrees,
+[WARN] and runtime caches that should never be committed.
+```
+
+This is the AI-defense pattern: when a script prints a warning that an AI
+agent might misinterpret as "try the obvious bypass," put the bypass command
+in the warning as a labeled negative example. Centralize the text in one
+helper so future edits stay consistent.
+
+### Wrong vs Correct
+
+#### Wrong — hand-rolled `git add -A` on a directory
+
+```python
+# `-A` plus a tree path stages every untracked file under it, including
+# .trellis/.backup-*/, .trellis/worktrees/, etc.
+subprocess.run(["git", "add", "-A", ".trellis/"], cwd=repo_root)
+```
+
+#### Wrong — `-f` retry on `ignored by`
+
+```python
+rc, _, err = run_git(["add", "--", *paths], cwd=repo_root)
+if "ignored by" in err.lower():
+    run_git(["add", "-f", "--", *paths], cwd=repo_root)  # reverted in 0.5.11
+```
+
+#### Correct — whitelist + plain add + warn-and-skip
+
+```python
+paths = safe_trellis_paths_to_add(repo_root)
+success, _, err = safe_git_add(paths, repo_root)
+if not success:
+    if "ignored by" in err.lower():
+        print_gitignore_warning(paths)
+    else:
+        print(f"[WARN] git add failed: {err.strip()}", file=sys.stderr)
+    return
+```
+
+### Tests Required
+
+When changing `safe_commit.py`, `add_session.py:_auto_commit_workspace`, or
+`task_store.py:_auto_commit_archive`:
+
+- `safe_trellis_paths_to_add` excludes `.trellis/.backup-*`, `.trellis/worktrees`,
+  `.trellis/.template-hashes.json`, `.trellis/.runtime`, `.trellis/.cache`.
+- `safe_git_add` returns `(False, False, stderr)` when paths are gitignored;
+  `used_force` is never `True` in any returned tuple.
+- `print_gitignore_warning` output contains the literal substring
+  `Do NOT use \`git add -f .trellis/\``.
+- `_auto_commit_*` early-returns when `session_auto_commit: false`, with no
+  `git` subprocess invocations.
 
 ---
 
@@ -573,7 +1012,7 @@ def _auto_commit(scope: str, message: str, repo_root: Path) -> None:
 When a script needs different output for different use cases, use `--mode` (not separate scripts or additional flags).
 
 **Example**: `get_context.py` serves two modes:
-- `--mode default` — full session context (DEVELOPER, GIT STATUS, RECENT COMMITS, CURRENT TASK, ACTIVE TASKS, MY TASKS, JOURNAL, PATHS)
+- `--mode default` — full session runtime (DEVELOPER, GIT STATUS, RECENT COMMITS, CURRENT TASK, ACTIVE TASKS, MY TASKS, JOURNAL, PATHS)
 - `--mode record` — focused output for record-session (MY ACTIVE TASKS first with emphasis, GIT STATUS, RECENT COMMITS, CURRENT TASK)
 
 ```python
@@ -583,6 +1022,105 @@ parser.add_argument(
     default="default",
     help="Output mode: default (full context) or record (for record-session)",
 )
+```
+
+### Session Context Git Contract
+
+#### 1. Scope / Trigger
+
+`common/session_context.py` must probe the Trellis root with
+`git rev-parse --is-inside-work-tree` before rendering root Git status.
+This applies to default text, default JSON, record text, and record JSON.
+
+#### 2. Signatures
+
+```python
+def _collect_root_git_info(repo_root: Path) -> dict
+def _collect_package_git_info(
+    repo_root: Path,
+    discover_unconfigured: bool = False,
+) -> list[dict]
+```
+
+#### 3. Contracts
+
+Root Git JSON includes `isRepo`, `branch`, `isClean`, `uncommittedChanges`,
+and `recentCommits`.
+
+When the root is a Git worktree, default and record text modes render:
+
+```text
+## GIT STATUS
+Branch: <branch>
+Working directory: <state>
+
+## RECENT COMMITS
+...
+```
+
+When the root is not a Git worktree, context must not render synthetic root
+values such as `Branch: unknown`, `Working directory: Clean`, or `(no commits)`.
+It must render:
+
+```text
+## GIT STATUS
+Root is not a Git repository.
+Run Git commands from the package repository paths listed below.
+
+## RECENT COMMITS
+Root has no Git commit history because it is not a Git repository.
+```
+
+For non-Git roots, JSON must set `isRepo: false`, `branch: ""`, and
+`isClean: false` so consumers do not interpret the root as a clean repository.
+
+Package repository sections are appended after root context. Configured
+`packages.<name>.git: true` entries are authoritative. If the root is not a Git
+repo and no configured package repos are available, runtime may fall back to the
+bounded child-repository scan documented in `directory-structure.md`.
+
+#### 4. Validation & Error Matrix
+
+| Condition | Behavior |
+|---|---|
+| Root `rev-parse --is-inside-work-tree` succeeds | Render root branch/status/log |
+| Root probe fails | Render explicit non-Git-root note; skip root status/log commands |
+| Configured `git: true` package has `.git` | Render package status/log |
+| Configured package path lacks `.git` | Skip that package |
+| Root is not Git and configured package repos are empty | Run bounded child repo discovery |
+| Fewer than two child repos are discovered | Do not infer polyrepo layout |
+
+#### 5. Good/Base/Bad Cases
+
+- Good: root is Git; output is unchanged from the normal root Git status.
+- Base: root is not Git but `packages.*.git: true` is configured; output gives
+  the root note, then package repo sections.
+- Bad: root is not Git and output says `Branch: unknown` or
+  `Working directory: Clean`.
+
+#### 6. Tests Required
+
+- Text context: root non-Git with configured `git: true` package.
+- Record context: same non-Git-root rendering as default text mode.
+- Runtime fallback: root non-Git with multiple unconfigured child repos.
+- JSON context: root non-Git has `isRepo: false` and `isClean: false`.
+
+#### 7. Wrong vs Correct
+
+Wrong:
+
+```text
+## GIT STATUS
+Branch: unknown
+Working directory: Clean
+```
+
+Correct:
+
+```text
+## GIT STATUS
+Root is not a Git repository.
+Run Git commands from the package repository paths listed below.
 ```
 
 **When to add a new mode** (not a new script):
@@ -629,6 +1167,161 @@ commit_hash = rest.split()[0]
 
 ---
 
+## Config helpers
+
+All keys in `.trellis/config.yaml` MUST be read through `common/config.py`
+(or its hook-side mirror `common/trellis_config.py` for hooks that cannot
+import the full task helpers). Both modules share the same parser chain:
+
+```
+_load_config(repo_root)
+  -> parse_simple_yaml(content)
+    -> _strip_inline_comment(value)
+    -> _unquote(value)
+```
+
+This is a load-bearing chain. Any new key added to `.trellis/config.yaml`
+must flow through it — do not write a custom reader, even a "small" one.
+
+### Anti-pattern: custom YAML reader that bypasses `_strip_inline_comment`
+
+Symptom: a value like `key: value  # comment` parses as `value  # comment`
+or as `value` plus garbage, depending on the reader's `.split("#")` /
+`.strip()` strategy. Tests that don't use the inline-comment form pass; live
+configs with the `# explanation` annotation in `templates/trellis/config.yaml`
+break silently.
+
+Two near-misses worth remembering:
+
+- `codex.dispatch_mode` originally had its own ad-hoc YAML reader. A
+  `# default` comment on the user's config silently broke dispatch routing.
+- `session_auto_commit` (0.5.11) almost shipped with a one-line
+  `config.get(...).strip()` reader before being routed through
+  `get_session_auto_commit`.
+
+Both were fixed by deleting the custom reader and routing through
+`_load_config` + a typed accessor.
+
+### Pattern: typed accessor on top of `_load_config`
+
+```python
+# common/config.py
+DEFAULT_SESSION_AUTO_COMMIT = True
+
+def get_session_auto_commit(repo_root: Path | None = None) -> bool:
+    config = _load_config(repo_root)
+    raw = config.get("session_auto_commit", DEFAULT_SESSION_AUTO_COMMIT)
+    if isinstance(raw, bool):
+        return raw
+    s = str(raw).strip().lower()
+    if s in ("true", "yes", "1", "on"):
+        return True
+    if s in ("false", "no", "0", "off"):
+        return False
+    print(
+        f"[WARN] invalid session_auto_commit value: {raw!r}; using true (default)",
+        file=sys.stderr,
+    )
+    return DEFAULT_SESSION_AUTO_COMMIT
+```
+
+Each new key gets its own `get_<key>` accessor. The accessor owns:
+
+1. The default constant (named `DEFAULT_<KEY>`, exported alongside the
+   accessor).
+2. Type coercion (string → bool / int / list as appropriate).
+3. Fallback-with-stderr-warn on invalid values. Config errors must NOT
+   raise — a bad config line should not block scripts.
+
+### Pattern: boolean tolerance
+
+Boolean accessors must accept native YAML `true` / `false` plus the
+case-insensitive string aliases `true / false / yes / no / 1 / 0 / on / off`.
+Anything else falls back to the default with a stderr warning.
+
+This breadth matters because the simple YAML parser does not coerce
+`true`/`false` to native bool — values arrive as strings. A reader that only
+checks `raw is True` misses every quoted-or-unquoted string variant the user
+naturally writes.
+
+### Pattern: document every key in `templates/trellis/config.yaml`
+
+Every accessor in `common/config.py` must have a corresponding commented-out
+example in `packages/cli/src/templates/trellis/config.yaml`, with:
+
+- A short prose explanation of effects (default behavior + opt-in/opt-out
+  semantics).
+- The accepted values, including the boolean alias set when relevant.
+- The default value commented out (so the key is discoverable but the file
+  doesn't override the in-code default until the user uncuts it).
+
+```yaml
+# Auto-commit behavior for session journal + task archive operations.
+# - true (default): scripts auto-stage and auto-commit ...
+# - false: scripts do not touch git. Files are still written to disk; ...
+#
+# Accepts: true / false / yes / no / 1 / 0 / on / off (case-insensitive).
+#
+# session_auto_commit: true
+```
+
+If the key is undocumented in `config.yaml`, users discover it only by
+reading source — which guarantees they will instead invent a custom
+workaround (see "AI-invented `git add -f`" above for what custom
+workarounds look like in practice).
+
+### Pattern: fixture tests must include the inline-comment form
+
+Test fixtures for any config accessor MUST include at least one row of the
+form `key: value  # comment`. This is the form that breaks custom readers
+silently. Without this fixture, regressions in `_strip_inline_comment` go
+undetected.
+
+```python
+# test fixture
+config_yaml = """
+session_auto_commit: false  # opt out — gitignored .trellis/
+session_commit_message: "chore: record"  # custom message with quotes
+"""
+# Both must parse to the unquoted, comment-free value.
+```
+
+### Wrong vs Correct
+
+#### Wrong — custom reader, no inline-comment handling
+
+```python
+def _read_session_auto_commit(repo_root: Path) -> bool:
+    text = (repo_root / ".trellis/config.yaml").read_text(encoding="utf-8")
+    for line in text.splitlines():
+        if line.startswith("session_auto_commit:"):
+            return line.split(":", 1)[1].strip() == "true"
+    return True
+# Fails on `session_auto_commit: false  # opt out` — returns True.
+```
+
+#### Correct — typed accessor on `_load_config`
+
+```python
+from common.config import get_session_auto_commit
+
+if not get_session_auto_commit(repo_root):
+    return  # respects inline comments, quotes, and bool aliases
+```
+
+### Tests Required
+
+When adding a new accessor in `common/config.py`:
+
+- Default behavior when the key is absent from `config.yaml`.
+- Value with inline comment: `key: value  # comment`.
+- Value with surrounding quotes: `key: "value"` and `key: 'value'`.
+- For boolean accessors: each of `true / false / yes / no / 1 / 0 / on / off`
+  in both upper and lower case.
+- Invalid value → returns default, prints stderr warning, does not raise.
+
+---
+
 ## Monorepo Config API (`common/config.py`)
 
 ### Config Functions
@@ -672,16 +1365,75 @@ hooks:
     - "python3 .trellis/scripts/hooks/my_hook.py create"
 ```
 
-### Worktree Submodule Initialization
+### Task → Package Binding Contract
 
-When `start.py` creates a worktree for a task, it calls `_init_submodules_for_task()`:
+**Rule**: The `package` field on a task is **bound at `task create` time and frozen into `task.json.package`**. Downstream scripts read that field; they do **not** re-resolve package from path, cwd, or runtime context.
 
-1. Read `packages` from config.yaml via `get_packages()`
-2. Resolve target package from task data or `default_package`
-3. Check if the package is a submodule via `get_submodule_packages()`
-4. Run `git submodule status <path>` in the worktree
-5. Parse the status prefix (see "Parsing Structured Command Output" above)
-6. If uninitialized (`-` prefix): run `git submodule update --init <path>`
+**Why it matters**: Once a task exists, changing `default_package` in `config.yaml` will not retroactively rebind existing tasks. Path-based inference is not implemented anywhere in the script layer — callers (human or AI) must pass `--package` explicitly if they want non-default binding.
+
+**Resolution order at `task create`** (`common/task_store.py:cmd_create`):
+
+| Priority | Source | Behavior on invalid value |
+|---|---|---|
+| 1 | CLI `--package <pkg>` (explicit) | **Fail-fast**: print available packages, exit 1 |
+| 2 | `default_package` (config.yaml) | Warn to stderr, fall through to `None` |
+| 3 | `None` | Task stored with `package: null` (allowed; spec scope falls back to full scan) |
+
+Single-repo mode (`packages:` absent from config): `--package` triggers a stderr warning and is silently ignored; stored `package` is always `None`.
+
+**Resolution order at read-time** (any script reading an existing task):
+
+| Priority | Source |
+|---|---|
+| 1 | `task.json.package` (the frozen binding) |
+| 2 | `resolve_package(task_package=..., repo_root=...)` — falls back to `default_package` if `task.json.package` is missing/invalid |
+
+Do **not** re-infer package from cwd, worktree path, or git remote. If the task is mis-bound, fix the stored field, do not wrap reads in path logic.
+
+**Spec scope is a separate layer** (`common/packages_context.py:_resolve_scope_set`). It consumes `task.package` but also has its own config surface `session.spec_scope`:
+
+| `session.spec_scope` value | Behavior |
+|---|---|
+| omitted / `null` | Full scan — all packages in `spec_scope` |
+| `"active_task"` | Use current task's `package`; fall back to `default_package` if missing |
+| `list[str]` | Use the explicit list; invalid entries fall back to task / default |
+
+### Wrong vs Correct
+
+#### Wrong — re-inferring package at read-time
+
+```python
+# DON'T: re-derive package from cwd
+def get_task_package(task_dir: Path) -> str | None:
+    cwd = Path.cwd()
+    for name, cfg in get_packages(repo_root).items():
+        if cwd.is_relative_to(repo_root / cfg["path"]):
+            return name
+    return get_default_package(repo_root)
+```
+
+Why wrong: silently diverges from `task.json.package`. A task created under `packages/cli` but later read from `docs-site/` would flip package, breaking spec scope, session runtime, and Linear sync idempotency.
+
+#### Correct — read the frozen field, fall back through `resolve_package`
+
+```python
+task = load_task(task_dir)
+task_package = task.package if task and isinstance(task.package, str) else None
+package = resolve_package(task_package=task_package, repo_root=repo_root)
+# package is now: task.json binding → default_package → None (in that order)
+```
+
+### Tests Required
+
+When changing `cmd_create`, `resolve_package`, or `validate_package`:
+
+- `test/commands/task_store.test.ts` (or equivalent Python test):
+  - `--package <valid>` in monorepo → `task.json.package == <valid>`
+  - `--package <invalid>` in monorepo → exit 1, stderr lists available packages, no `task.json` written
+  - `--package <anything>` in single-repo → warning on stderr, `task.json.package is None`
+  - no `--package` in monorepo with `default_package` set → `task.json.package == default_package`
+  - no `--package` in monorepo with `default_package` missing from `packages:` → warning, `task.json.package is None`
+- Assertion points: `task_json_path.exists()`, `read_json(task_json_path)["package"]`, captured stderr.
 
 ---
 
@@ -869,7 +1621,7 @@ def get_phase_info(task_json: Path) -> str:
     action = _phase_action(data, phase)      # no file I/O
 ```
 
-**When to use**: Any module where public functions compose by calling other public functions that each read the same file (e.g., `phase.py`, `registry.py`).
+**When to use**: Any module where public functions compose by calling other public functions that each read the same file (e.g., `task_store.py`, `config.py`).
 
 ---
 
@@ -881,7 +1633,7 @@ def get_phase_info(task_json: Path) -> str:
 - Use type hints (Python 3.10+ syntax)
 - Return exit codes from `main()`
 - Print errors to stderr
-- Always use `python3` in documentation and messages
+- Keep user-facing Python commands platform-aware
 - Use `encoding="utf-8"` for all file operations
 
 ### DON'T
@@ -908,4 +1660,4 @@ See `.trellis/scripts/task.py` for a comprehensive example with:
 
 ## Migration Note
 
-> **Historical Context**: Scripts were migrated from Bash to Python in v0.3.0 for cross-platform compatibility. The old shell scripts are archived in `.trellis/scripts-shell-archive/` (if preserved).
+> **Historical Context**: Scripts were migrated from Bash to Python in v0.3.0 for cross-platform compatibility. In v0.5.0, the `multi_agent/` pipeline directory (`plan.py`, `start.py`, `status.py`, etc.) was removed along with `phase.py`, `registry.py`, and `worktree.py` from `common/`. The `_bootstrap.py` shim is no longer needed.

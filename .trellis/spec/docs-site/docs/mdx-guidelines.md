@@ -229,6 +229,72 @@ title: 'Templates'
 ...
 ```
 
+### Mixed Block/Inline JSX Closing Tag
+
+**Symptom**: Whole page renders as `A parsing error occurred. Please contact the owner of this website.` The title also falls back to the file slug (e.g. "Ch12 multi platform" instead of the frontmatter title), confirming MDX compilation failed for the entire file — not just the block.
+
+**Cause**: Callout components (`<Note>`, `<Warning>`, `<Info>`, `<Tip>`) accept either inline form (tag + content + close on one line) OR block form (tags on own lines). Mixing the two breaks the MDX parser.
+
+```mdx
+<!-- DON'T: opening on own line, closing glued to content -->
+<Note>
+  Don't pick **Full re-initialize** — it overwrites existing config.</Note>
+
+<!-- DON'T: opening glued to content, closing on own line -->
+<Note>Don't pick **Full re-initialize** — it overwrites existing config.
+</Note>
+```
+
+```mdx
+<!-- DO: fully inline (short content) -->
+<Note>Don't pick **Full re-initialize** — it overwrites existing config.</Note>
+
+<!-- DO: fully block (multi-line or markdown-heavy content) -->
+<Note>
+  Don't pick **Full re-initialize** — it overwrites existing config.
+</Note>
+```
+
+**Prevention**: Pick one form per callout and keep both tags consistent. When the body contains backtick code spans, bolded text, or more than one sentence, default to the block form for readability.
+
+### Bulleted List Inside `<Note>` / `<Warning>` / `<Info>` / `<Tip>`
+
+**Symptom**: Same as Mixed Block/Inline above — page renders as `A parsing error occurred`, title falls back to slug.
+
+**Cause**: Prettier reformats Markdown inside JSX block bodies. Bulleted lists indented under the opening tag get pulled to column 0; the closing tag then gets indented 2 spaces. Mintlify sees the bullets as content outside the `<Note>` and the closing tag as misplaced. Parse fails.
+
+```mdx
+<!-- Authored as: -->
+<Note>
+  Hook support varies by platform:
+
+  - **SessionStart** ships on Claude Code, Cursor, OpenCode...
+  - **PreToolUse** ships on a smaller subset...
+</Note>
+
+<!-- Prettier rewrites to (broken): -->
+<Note>
+  Hook support varies by platform:
+
+- **SessionStart** ships on Claude Code, Cursor, OpenCode...
+- **PreToolUse** ships on a smaller subset...
+  </Note>
+```
+
+**Prevention**: Don't put bulleted lists inside callouts. Keep the callout to a single inline summary line; place the list outside it.
+
+```mdx
+<!-- DO -->
+<Note>Hook support varies by platform and by event — see the per-event matrix below.</Note>
+
+- **SessionStart** ships on Claude Code, Cursor, OpenCode...
+- **PreToolUse** ships on a smaller subset...
+```
+
+If the bullets really must be inside the callout (rare — usually the inline-summary + list-outside form reads better anyway), use raw HTML `<ul><li>` instead of Markdown bullets so Prettier won't reformat them.
+
+**Why this isn't caught by `prettier --check` or `markdownlint-cli2`**: both pass on the broken output. Only `mintlify broken-links` (or rendering the page in a Mintlify dev server) surfaces the parse failure. Worth wiring into CI.
+
 ### Table Column Alignment
 
 **Problem**: markdownlint MD060 requires consistent table pipe alignment.

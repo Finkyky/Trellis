@@ -21,6 +21,21 @@ describe("copilot getAllHooks", () => {
 			expect(hook.content.length).toBeGreaterThan(0);
 		}
 	});
+
+	it("session-start.py does not emit a misleading 'Copilot ignores' systemMessage", () => {
+		// Regression guard for GitHub #248: the previous Trellis hook hardcoded a
+		// user-visible systemMessage claiming Copilot ignores SessionStart output.
+		// Microsoft's VS Code Agent hooks docs (preview, since VS Code 1.110)
+		// document additionalContext as the injection field, so neither the
+		// runtime systemMessage nor the docstring should re-assert "ignores".
+		const hooks = getAllHooks();
+		const sessionStart = hooks.find((h) => h.name === "session-start.py");
+		expect(sessionStart).toBeDefined();
+		const content = sessionStart?.content ?? "";
+		expect(content).not.toContain("systemMessage");
+		expect(content).not.toContain("currently ignores sessionStart hook output");
+		expect(content).not.toMatch(/Copilot[^\n]*ignores hook output/);
+	});
 });
 
 describe("copilot getHooksConfig", () => {
@@ -39,14 +54,22 @@ describe("copilot getHooksConfig", () => {
 		);
 	});
 
-	it("defines only SessionStart command hook with timeout", () => {
+	it("defines SessionStart + userPromptSubmitted command hooks", () => {
 		const parsed = JSON.parse(getHooksConfig()) as {
-			hooks?: Record<string, { type?: string; timeout?: number }[]>;
+			hooks?: Record<
+				string,
+				{ type?: string; timeout?: number; timeoutSec?: number }[]
+			>;
 		};
 
-		expect(Object.keys(parsed.hooks ?? {})).toEqual(["SessionStart"]);
+		expect(Object.keys(parsed.hooks ?? {})).toEqual([
+			"SessionStart",
+			"userPromptSubmitted",
+		]);
 		expect(parsed.hooks?.SessionStart?.[0]?.type).toBe("command");
-		expect(parsed.hooks?.SessionStart?.[0]?.timeout).toBe(10);
+		expect(parsed.hooks?.SessionStart?.[0]?.timeout).toBe(30);
+		expect(parsed.hooks?.userPromptSubmitted?.[0]?.type).toBe("command");
+		expect(parsed.hooks?.userPromptSubmitted?.[0]?.timeoutSec).toBe(15);
 	});
 });
 

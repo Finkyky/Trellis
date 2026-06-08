@@ -7,7 +7,6 @@ import { copyTrellisDir } from "../templates/extract.js";
 import {
   workflowMdTemplate,
   configYamlTemplate,
-  worktreeYamlTemplate,
   gitignoreTemplate,
 } from "../templates/trellis/index.js";
 
@@ -36,6 +35,7 @@ import {
 } from "../templates/markdown/index.js";
 
 import { writeFile, ensureDir } from "../utils/file-writer.js";
+import { replacePythonCommandLiterals } from "./shared.js";
 import {
   sanitizePkgName,
   type ProjectType,
@@ -53,8 +53,6 @@ interface DocDefinition {
 export interface WorkflowOptions {
   /** Detected or specified project type */
   projectType: ProjectType;
-  /** Enable multi-agent pipeline with worktree support */
-  multiAgent?: boolean;
   /** Skip creating local spec templates (when using remote template) — single-repo mode */
   skipSpecTemplates?: boolean;
   /** Detected monorepo packages (enables monorepo spec creation) */
@@ -72,7 +70,6 @@ export interface WorkflowOptions {
  * 3. Creating workspace/ with index.md
  * 4. Creating tasks/ directory
  * 5. Creating spec/ with templates (not dogfooded - generic templates)
- * 6. Copying worktree.yaml if multi-agent is enabled
  *
  * @param cwd - Current working directory
  * @param options - Workflow options including project type
@@ -82,7 +79,6 @@ export async function createWorkflowStructure(
   options?: WorkflowOptions,
 ): Promise<void> {
   const projectType = options?.projectType ?? "fullstack";
-  const multiAgent = options?.multiAgent ?? false;
   const skipSpecTemplates = options?.skipSpecTemplates ?? false;
   const packages = options?.packages;
   const remoteSpecPackages = options?.remoteSpecPackages;
@@ -98,7 +94,7 @@ export async function createWorkflowStructure(
   // Copy workflow.md from templates
   await writeFile(
     path.join(cwd, PATHS.WORKFLOW_GUIDE_FILE),
-    workflowMdTemplate,
+    replacePythonCommandLiterals(workflowMdTemplate),
   );
 
   // Copy .gitignore from templates
@@ -117,19 +113,11 @@ export async function createWorkflowStructure(
   ensureDir(path.join(cwd, PATHS.WORKSPACE));
   await writeFile(
     path.join(cwd, PATHS.WORKSPACE, "index.md"),
-    agentProgressIndexContent,
+    replacePythonCommandLiterals(agentProgressIndexContent),
   );
 
   // Create tasks/ directory
   ensureDir(path.join(cwd, PATHS.TASKS));
-
-  // Copy worktree.yaml if multi-agent enabled
-  if (multiAgent) {
-    await writeFile(
-      path.join(cwd, DIR_NAMES.WORKFLOW, "worktree.yaml"),
-      worktreeYamlTemplate,
-    );
-  }
 
   // Create spec templates based on project type
   // These are NOT dogfooded - they are generic templates for new projects
