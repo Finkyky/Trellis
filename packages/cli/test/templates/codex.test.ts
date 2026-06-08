@@ -97,4 +97,22 @@ describe("codex getConfigTemplate", () => {
     expect(config.content).toContain("project_doc_fallback_filenames");
     expect(config.content).toContain("AGENTS.md");
   });
+
+  it("keeps multi_agent_v2 default wait timeout at least the minimum", () => {
+    const config = getConfigTemplate();
+    const minWaitMatch = config.content.match(
+      /^min_wait_timeout_ms\s*=\s*(\d+)$/m,
+    );
+    const defaultWaitMatch = config.content.match(
+      /^default_wait_timeout_ms\s*=\s*(\d+)$/m,
+    );
+
+    expect(minWaitMatch).not.toBeNull();
+    expect(defaultWaitMatch).not.toBeNull();
+
+    const minWait = Number(minWaitMatch?.[1]);
+    const defaultWait = Number(defaultWaitMatch?.[1]);
+
+    expect(defaultWait).toBeGreaterThanOrEqual(minWait);
+  });
 });
